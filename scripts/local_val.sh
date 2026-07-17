@@ -4,7 +4,7 @@ export HYDRA_FULL_ERROR=1
 export TF_CPP_MIN_LOG_LEVEL=2
 
 MY_EXPERIMENT="local_val"
-VAL_K=48
+VAL_K=40
 MY_TASK_NAME=$MY_EXPERIMENT-K$VAL_K"-debug"
 
 source ~/miniconda3/etc/profile.d/conda.sh

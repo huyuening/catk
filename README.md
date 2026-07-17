@@ -70,7 +70,7 @@ In the scripts, we provide
 - [scripts/local_val.sh](scripts/local_val.sh) for local validation.
 - [scripts/wosac_sub.sh](scripts/wosac_sub.sh) for packing submission files.
 
-The training script runs single-node DDP and defaults to 8 GPUs. Its Conda installation, environment, cache root, GPU count, task name, and W&B mode can be overridden with environment variables. The cache root must contain CatK-preprocessed `training`, `validation`, and `validation_tfrecords_splitted` data.
+The training script runs single-node DDP and defaults to 8 GPUs. Its Conda installation, environment, cache root, GPU count, task name, and W&B mode can be overridden with environment variables. The cache root must contain CatK-preprocessed `training`, `validation`, and `validation_tfrecords_splitted` data. The default experiment configs follow the paper: BC pre-training uses 32 epochs and CAT-32 fine-tuning uses 10 epochs, both with a total batch size of 80 on 8 GPUs. Strict paper reproduction requires a cache generated from WOMD v1.2.1; override `CACHE_ROOT` if the server default points to another dataset version.
 
 ```
 CONDA_ROOT=/root/anaconda3 \
@@ -88,6 +88,8 @@ MY_EXPERIMENT=clsft \
 MY_TASK_NAME=clsft_catk_b200 \
 bash scripts/train.sh ckpt_path=/path/to/pretrained/last.ckpt
 ```
+
+The local validation config follows the paper's 2% validation protocol (880 scenarios) with inference `K=40`. WOSAC submission generation keeps the leaderboard setting `K=48` and temperature `1.0`. The ego GMM configs likewise follow the paper with 32 BC epochs followed by 5 CAT-3 fine-tuning epochs.
 
 To reproduce our final results, you should follow the following steps
 1. Use [scripts/train.sh](scripts/train.sh) with the [BC pre-training config](configs/experiment/pre_bc.yaml) to pre-train the SMART-tiny 7M model.

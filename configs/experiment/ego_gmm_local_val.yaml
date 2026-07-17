@@ -21,11 +21,17 @@ ckpt_path: YOUR_MODEL.ckpt
 
 trainer:
   limit_train_batches: 1.0
-  limit_val_batches: 60
+  # 55 batches * 16 scenarios = 880 scenarios (the paper's 2% split).
+  limit_val_batches: 55
   check_val_every_n_epoch: 1
+  accelerator: gpu
+  devices: 1
+  strategy: auto
 
 data:
   train_batch_size: 16
   val_batch_size: 16
   test_batch_size: 16
   num_workers: 8
+
+action: validate

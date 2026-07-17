@@ -12,7 +12,7 @@ CONDA_ENV="${CONDA_ENV:-trajtok}"
 CACHE_ROOT="${CACHE_ROOT:-/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario}"
 NUM_GPUS="${NUM_GPUS:-8}"
 MY_EXPERIMENT="${MY_EXPERIMENT:-pre_bc}"
-MY_TASK_NAME="${MY_TASK_NAME:-pre_bc_b200}"
+MY_TASK_NAME="${MY_TASK_NAME:-${MY_EXPERIMENT}_b200}"
 WANDB_OFFLINE="${WANDB_OFFLINE:-true}"
 WANDB_ENTITY="${WANDB_ENTITY:-null}"
 
