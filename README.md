@@ -70,7 +70,25 @@ In the scripts, we provide
 - [scripts/local_val.sh](scripts/local_val.sh) for local validation.
 - [scripts/wosac_sub.sh](scripts/wosac_sub.sh) for packing submission files.
 
-The default script runs with single GPU. We use DDP for multi GPU training and validation, and the codes are also found in the bash scripts.
+The training script runs single-node DDP and defaults to 8 GPUs. Its Conda installation, environment, cache root, GPU count, task name, and W&B mode can be overridden with environment variables. The cache root must contain CatK-preprocessed `training`, `validation`, and `validation_tfrecords_splitted` data.
+
+```
+CONDA_ROOT=/root/anaconda3 \
+CONDA_ENV=trajtok \
+CACHE_ROOT=/path/to/catk_cache \
+NUM_GPUS=8 \
+MY_TASK_NAME=pre_bc_b200 \
+bash scripts/train.sh
+```
+
+Additional Hydra overrides can be appended to the command. For example, after BC pre-training, run CAT-K fine-tuning with:
+
+```
+MY_EXPERIMENT=clsft \
+MY_TASK_NAME=clsft_catk_b200 \
+bash scripts/train.sh ckpt_path=/path/to/pretrained/last.ckpt
+```
+
 To reproduce our final results, you should follow the following steps
 1. Use [scripts/train.sh](scripts/train.sh) with the [BC pre-training config](configs/experiment/pre_bc.yaml) to pre-train the SMART-tiny 7M model.
 2. Use [scripts/train.sh](scripts/train.sh) with the [CLSFT with CAT-K config](configs/experiment/clsft.yaml) to fine-tune the SMART-tiny model pre-trained in step 1.
