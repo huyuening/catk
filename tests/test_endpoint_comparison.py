@@ -1,4 +1,8 @@
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -12,6 +16,25 @@ from tools.compare_endpoint_interpolation import (
 
 
 class EndpointComparisonTest(unittest.TestCase):
+    def test_script_adds_repository_root_when_launched_elsewhere(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        script_path = repo_root / "tools" / "compare_endpoint_interpolation.py"
+        code = (
+            f"import runpy; runpy.run_path({str(script_path)!r}, "
+            "run_name='catk_comparison_tool'); import src; print(src.__file__)"
+        )
+
+        with tempfile.TemporaryDirectory() as working_directory:
+            result = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=working_directory,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertIn(str(repo_root / "src"), result.stdout)
+
     def test_endpoint_delta_uses_every_fifth_future_step(self):
         raw = np.zeros((1, 1, 80, 4), dtype=np.float32)
         post = raw.copy()

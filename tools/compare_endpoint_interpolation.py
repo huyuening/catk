@@ -27,6 +27,7 @@ import importlib.util
 import json
 import os
 import pickle
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,13 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TRAJTOK_ROOT = os.environ.get("TRAJTOK_ROOT", "/root/workspace/TrajTok")
 TYPE_NAMES = {0: "vehicle", 1: "pedestrian", 2: "cyclist"}
+
+# Running ``python tools/compare_endpoint_interpolation.py`` sets sys.path[0]
+# to ``tools/`` rather than the repository root. Hydra resolves targets such as
+# ``src.smart.datamodules.MultiDataModule`` through normal Python imports.
+repo_root_str = str(REPO_ROOT)
+if repo_root_str not in sys.path:
+    sys.path.insert(0, repo_root_str)
 
 
 def parse_args():
