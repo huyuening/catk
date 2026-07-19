@@ -112,6 +112,54 @@ class EndpointInterpolatorTest(unittest.TestCase):
         self.assertTrue(torch.allclose(pred_traj[0, 4::5], endpoint_pos[0]))
         self.assertTrue(torch.equal(pred_traj[1], torch.zeros_like(pred_traj[1])))
 
+    def test_moving_only_policy_leaves_other_states_raw(self):
+        interpolator = EndpointInterpolator(
+            {
+                "is_active": True,
+                "method": "global_cubic",
+                "heading_method": "endpoint_cubic",
+                "moving_only": True,
+                "moving_speed_threshold_mps": 0.5,
+                "moving_segment_only": True,
+                "moving_segment_speed_threshold_mps": 0.5,
+                "low_speed_reconstruction": False,
+                "static_reconstruction": False,
+                "smooth_output": False,
+            }
+        )
+        start_pos = torch.zeros(2, 2)
+        start_head = torch.zeros(2)
+        endpoint_pos = self._curved_endpoints(2)
+        # Agent 0 is moving overall but has one stopped segment.
+        endpoint_pos[0, 7] = endpoint_pos[0, 6]
+        # Agent 1 stays below the moving threshold for the entire rollout.
+        endpoint_pos[1, :, 0] = torch.linspace(0.01, 0.16, 16)
+        endpoint_pos[1, :, 1] = 0.0
+        endpoint_head = torch.zeros(2, 16)
+        raw_traj = torch.randn(2, 80, 2)
+        raw_head = torch.randn(2, 80)
+
+        pred_traj, pred_head = interpolator.reconstruct(
+            raw_traj=raw_traj,
+            raw_head=raw_head,
+            start_pos=start_pos,
+            start_head=start_head,
+            endpoint_pos=endpoint_pos,
+            endpoint_head=endpoint_head,
+            agent_type=torch.zeros(2, dtype=torch.long),
+        )
+
+        stopped_segment = slice(7 * 5, 8 * 5)
+        self.assertTrue(
+            torch.equal(pred_traj[0, stopped_segment], raw_traj[0, stopped_segment])
+        )
+        self.assertTrue(
+            torch.equal(pred_head[0, stopped_segment], raw_head[0, stopped_segment])
+        )
+        self.assertTrue(torch.equal(pred_traj[1], raw_traj[1]))
+        self.assertTrue(torch.equal(pred_head[1], raw_head[1]))
+        self.assertFalse(torch.equal(pred_traj[0, :5], raw_traj[0, :5]))
+
     def test_rejects_incompatible_future_length(self):
         interpolator = EndpointInterpolator({"is_active": True})
         with self.assertRaisesRegex(ValueError, "shape mismatch"):

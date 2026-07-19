@@ -18,6 +18,29 @@ from tools.compare_endpoint_interpolation import (
 
 
 class EndpointComparisonTest(unittest.TestCase):
+    def test_moving_only_validation_experiment(self):
+        try:
+            import hydra
+        except ModuleNotFoundError:
+            self.skipTest("Hydra is not installed in this test environment")
+
+        config_dir = Path(__file__).resolve().parents[1] / "configs"
+        with hydra.initialize_config_dir(
+            config_dir=str(config_dir), version_base=None
+        ):
+            cfg = hydra.compose(
+                config_name="run.yaml",
+                overrides=["experiment=inference_post_interp_moving_only"],
+            )
+
+        endpoint_config = cfg.model.model_config.decoder.endpoint_interpolation
+        self.assertTrue(endpoint_config.is_active)
+        self.assertTrue(endpoint_config.moving_only)
+        self.assertTrue(endpoint_config.moving_segment_only)
+        self.assertFalse(endpoint_config.low_speed_reconstruction)
+        self.assertFalse(endpoint_config.static_reconstruction)
+        self.assertFalse(endpoint_config.smooth_output)
+
     def test_offline_reconstruction_reuses_one_rollout(self):
         interpolator = EndpointInterpolator(
             config={
@@ -80,9 +103,11 @@ class EndpointComparisonTest(unittest.TestCase):
                 trajtok_root="/root/workspace/TrajTok",
                 sampling_num_k=1,
                 sampling_temp=1.0,
+                postprocess_policy="moving_only",
             )
             cfg = build_cfg(args)
             resolved_paths = OmegaConf.to_container(cfg.paths, resolve=True)
+            endpoint_config = cfg.model.model_config.decoder.endpoint_interpolation
 
             self.assertTrue(HydraConfig.initialized())
             self.assertEqual(
@@ -93,6 +118,11 @@ class EndpointComparisonTest(unittest.TestCase):
                 Path(resolved_paths["output_dir"]),
                 Path(output_directory).resolve(),
             )
+            self.assertTrue(endpoint_config.moving_only)
+            self.assertTrue(endpoint_config.moving_segment_only)
+            self.assertFalse(endpoint_config.low_speed_reconstruction)
+            self.assertFalse(endpoint_config.static_reconstruction)
+            self.assertFalse(endpoint_config.smooth_output)
 
     def test_script_adds_repository_root_when_launched_elsewhere(self):
         repo_root = Path(__file__).resolve().parents[1]

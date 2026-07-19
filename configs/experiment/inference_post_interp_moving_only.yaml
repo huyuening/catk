@@ -1,0 +1,21 @@
+# @package _global_
+
+# Fast WOSAC 2025 ablation: interpolate only clearly moving trajectory
+# segments. Static/low-speed agents and stopped segments retain CatK's raw
+# 10 Hz token expansion.
+defaults:
+  - inference
+  - _self_
+
+model:
+  model_config:
+    decoder:
+      endpoint_interpolation:
+        is_active: true
+        moving_only: true
+        moving_speed_threshold_mps: 0.5
+        moving_segment_only: true
+        moving_segment_speed_threshold_mps: 0.5
+        low_speed_reconstruction: false
+        static_reconstruction: false
+        smooth_output: false

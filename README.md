@@ -139,6 +139,21 @@ CATK_CKPT=/path/to/pre_bc.ckpt \
 python run.py experiment=inference_post_interp task_name=pre_bc_post_interp
 ```
 
+For the moving-only ablation, disable low-speed/static reconstruction and
+leave every non-moving agent and stopped segment unchanged:
+
+```
+CATK_CKPT=/path/to/pre_bc.ckpt \
+python run.py \
+  experiment=inference_post_interp_moving_only \
+  task_name=pre_bc_post_interp_moving_only
+```
+
+This policy uses `0.5 m/s` as both the moving-agent and moving-segment
+threshold. These thresholds can be overridden with
+`model.model_config.decoder.endpoint_interpolation.moving_speed_threshold_mps`
+and `moving_segment_speed_threshold_mps`.
+
 For a paired comparison, run the baseline with the same checkpoint, validation data, and seed:
 
 ```
@@ -155,7 +170,8 @@ CATK_CKPT=/path/to/pre_bc.ckpt \
 TRAJTOK_ROOT=/root/workspace/TrajTok \
 python tools/compare_endpoint_interpolation.py \
   --split val \
-  --scene-index 0
+  --scene-index 0 \
+  --postprocess-policy moving_only
 ```
 
 The default automatically selects the agent with the largest reduction in mean absolute angular acceleration. A specific scenario and agent can be selected instead:
@@ -168,7 +184,7 @@ python tools/compare_endpoint_interpolation.py \
   --agent-id AGENT_ID
 ```
 
-Use `--select-motion-mode endpoint_interpolation`, `low_speed_reconstruction`, or `static_reconstruction` to automatically select an agent from one postprocessing branch. Outputs are written under `outputs/catk_endpoint_interpolation_check`: a six-panel PNG, per-step CSV, raw/post-interpolation rollout PKLs, and a JSON summary. The default sampling `K=1` gives the clearest deterministic comparison; set `--sampling-num-k 48` to use the validation sampling width. Raw and post-interpolation outputs share one generated token path by construction.
+Omit `--postprocess-policy moving_only` to inspect the full low-speed/static policy. Use `--select-motion-mode endpoint_interpolation`, `raw_token_expansion`, or `mixed` to automatically select an agent from one moving-only branch; the full policy also supports `low_speed_reconstruction` and `static_reconstruction`. Outputs are written under `outputs/catk_endpoint_interpolation_check`: a six-panel PNG, per-step CSV, raw/post-interpolation rollout PKLs, and a JSON summary. Moving-only filenames receive a `_moving_only` suffix, so they do not overwrite full-policy outputs. The default sampling `K=1` gives the clearest deterministic comparison; set `--sampling-num-k 48` to use the validation sampling width. Raw and post-interpolation outputs share one generated token path by construction.
 
 To reproduce our final results, you should follow the following steps
 1. Use [scripts/train.sh](scripts/train.sh) with the [BC pre-training config](configs/experiment/pre_bc.yaml) to pre-train the SMART-tiny 7M model.

@@ -83,6 +83,15 @@ def parse_args():
             "one endpoint postprocessing mode."
         ),
     )
+    parser.add_argument(
+        "--postprocess-policy",
+        choices=["full", "moving_only"],
+        default="full",
+        help=(
+            "full keeps low-speed/static reconstruction; moving_only applies "
+            "interpolation only to moving agents and moving segments."
+        ),
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=817)
     parser.add_argument("--dt", type=float, default=0.1)
@@ -172,7 +181,14 @@ def build_cfg(args):
         sampling = cfg.model.model_config.validation_rollout_sampling
         sampling.num_k = args.sampling_num_k
         sampling.temp = args.sampling_temp
-        cfg.model.model_config.decoder.endpoint_interpolation.is_active = False
+        endpoint_config = cfg.model.model_config.decoder.endpoint_interpolation
+        endpoint_config.is_active = False
+        if getattr(args, "postprocess_policy", "full") == "moving_only":
+            endpoint_config.moving_only = True
+            endpoint_config.moving_segment_only = True
+            endpoint_config.low_speed_reconstruction = False
+            endpoint_config.static_reconstruction = False
+            endpoint_config.smooth_output = False
 
     HydraConfig.instance().set_config(cfg)
     return cfg
@@ -590,9 +606,13 @@ def write_selected_csv(path, plotter, raw_states, post_states, gt_states, dt):
             writer.writerow(row)
 
 
-def resolve_outputs(output_dir, scenario_id, rollout_index, agent_id):
+def resolve_outputs(
+    output_dir, scenario_id, rollout_index, agent_id, postprocess_policy="full"
+):
     root = Path(output_dir)
     stem = f"{scenario_id}_rollout{rollout_index}_agent{agent_id}"
+    if postprocess_policy != "full":
+        stem = f"{stem}_{postprocess_policy}"
     return {
         "figure": root / "images" / f"{stem}.png",
         "csv": root / "tables" / f"{stem}.csv",
@@ -615,6 +635,7 @@ def main():
     cfg = build_cfg(args)
     print(f"Using device: {device}")
     print(f"TrajTok plotter: {Path(args.trajtok_root) / 'tools' / 'visualize_reconstruction.py'}")
+    print(f"Postprocess policy: {args.postprocess_policy}")
     print(f"Data config:\n{OmegaConf.to_yaml(cfg.data)}")
 
     datamodule = hydra.utils.instantiate(cfg.data)
@@ -710,6 +731,7 @@ def main():
         scenario_id,
         args.rollout_index,
         selected_agent_id,
+        args.postprocess_policy,
     )
 
     title = (
@@ -769,6 +791,7 @@ def main():
         "rollout_index": args.rollout_index,
         "token_paths_identical": True,
         "comparison_method": "single_rollout_offline_postprocessing",
+        "postprocess_policy": args.postprocess_policy,
         "selected_agent": {
             "index": agent_index,
             "id": selected_agent_id,
