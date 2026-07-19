@@ -1,0 +1,54 @@
+# @package _global_
+
+defaults:
+  - override /model: smart
+  - override /trainer: ddp
+
+model:
+  model_config:
+    n_rollout_closed_val: 32
+    n_batch_wosac_metric: -1 # evaluate every validation batch
+    n_vis_batch: 0
+    n_vis_scenario: 0
+    n_vis_rollout: 0
+    val_open_loop: false
+    val_closed_loop: true
+    wosac_backend: fast
+    wosac_metrics_version: "2025"
+    trajtok_root: ${oc.env:TRAJTOK_ROOT,/root/workspace/TrajTok}
+    fast_wosac_gt_dir: ${oc.env:FAST_WOSAC_GT_DIR,${paths.validation_gt_dir}}
+    validation_rollout_sampling:
+      criterium: topk_prob
+      num_k: 48
+      temp: 1.0
+
+ckpt_path: ${oc.env:CATK_CKPT,null}
+
+paths:
+  cache_root: ${oc.env:CACHE_ROOT,/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario}
+  validation_gt_dir: ${paths.cache_root}/validation_gt
+
+trainer:
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  limit_test_batches: 1.0
+  num_sanity_val_steps: 0
+  accelerator: gpu
+  devices: -1
+  num_nodes: 1
+
+data:
+  train_batch_size: 16
+  val_batch_size: 16
+  test_batch_size: 16
+  num_workers: 8
+  shuffle: false
+
+logger:
+  wandb:
+    offline: true
+    entity: null
+    project: catk-fast-wosac-2025
+    log_model: false
+
+action: validate

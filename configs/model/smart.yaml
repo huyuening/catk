@@ -11,6 +11,10 @@ model_config:
   n_vis_rollout: 5
   val_open_loop: true
   val_closed_loop: true
+  wosac_backend: official # {official, fast}
+  wosac_metrics_version: "2024"
+  trajtok_root: ${oc.env:TRAJTOK_ROOT,/root/workspace/TrajTok}
+  fast_wosac_gt_dir: null
   token_processor:
     map_token_file: "map_traj_token5.pkl"
     agent_token_file: "agent_vocab_555_s2.pkl"

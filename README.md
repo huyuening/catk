@@ -91,6 +91,43 @@ bash scripts/train.sh ckpt_path=/path/to/pretrained/last.ckpt
 
 The local validation config follows the paper's 2% validation protocol (880 scenarios) with inference `K=40`. WOSAC submission generation keeps the leaderboard setting `K=48` and temperature `1.0`. The ego GMM configs likewise follow the paper with 32 BC epochs followed by 5 CAT-3 fine-tuning epochs.
 
+### Fast WOSAC 2025 validation
+
+CatK can use TrajTok's GPU-accelerated WOSAC 2025 evaluator directly from a sibling checkout. By default, the inference config expects CatK at `/root/workspace/catk`, TrajTok at `/root/workspace/TrajTok`, and the CatK cache at `/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario`. It evaluates the complete validation split with 32 rollouts per scenario and inference `K=48`. It first looks for TrajTok-preprocessed ground truth in `${CACHE_ROOT}/validation_gt`; when that directory or an individual scenario is unavailable, it falls back to CatK's per-scenario TFRecord.
+
+Set the checkpoint through the environment for a TrajTok-style command:
+
+```
+CATK_CKPT=/path/to/model.ckpt \
+python run.py experiment=inference task_name=eval
+```
+
+Equivalently, pass the checkpoint as a Hydra override:
+
+```
+python run.py \
+  experiment=inference \
+  task_name=eval \
+  ckpt_path=/path/to/model.ckpt
+```
+
+The inference config uses all visible GPUs through single-node DDP and logs to W&B offline by default. Common optional overrides are:
+
+```
+CACHE_ROOT=/path/to/catk_cache \
+TRAJTOK_ROOT=/path/to/TrajTok \
+FAST_WOSAC_GT_DIR=/path/to/validation_gt \
+python run.py \
+  experiment=inference \
+  task_name=eval \
+  ckpt_path=/path/to/model.ckpt \
+  trainer.limit_val_batches=10 \
+  logger.wandb.offline=false \
+  logger.wandb.entity=YOUR_WANDB_ENTITY
+```
+
+TrajTok Fast WOSAC is intended for rapid local evaluation. Use the official WOSAC evaluation server for final competition results.
+
 To reproduce our final results, you should follow the following steps
 1. Use [scripts/train.sh](scripts/train.sh) with the [BC pre-training config](configs/experiment/pre_bc.yaml) to pre-train the SMART-tiny 7M model.
 2. Use [scripts/train.sh](scripts/train.sh) with the [CLSFT with CAT-K config](configs/experiment/clsft.yaml) to fine-tune the SMART-tiny model pre-trained in step 1.

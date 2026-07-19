@@ -13,6 +13,7 @@
 
 from src.smart.metrics.cross_entropy import CrossEntropy
 from src.smart.metrics.ego_nll import EgoNLL
+from src.smart.metrics.fast_wosac_metrics import FastWOSACMetrics
 from src.smart.metrics.gmm_ade import GMMADE
 from src.smart.metrics.min_ade import minADE
 from src.smart.metrics.next_token_cls import TokenCls

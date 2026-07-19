@@ -39,6 +39,12 @@ def run(cfg: DictConfig) -> None:
     if cfg.get("seed"):
         L.seed_everything(cfg.seed, workers=True)
 
+    if cfg.action in {"finetune", "validate", "test"} and not cfg.get("ckpt_path"):
+        raise ValueError(
+            f"action={cfg.action} requires a checkpoint. Pass "
+            "ckpt_path=/path/to/model.ckpt or set CATK_CKPT."
+        )
+
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
 
@@ -52,7 +58,7 @@ def run(cfg: DictConfig) -> None:
     logger: List[Logger] = instantiate_loggers(cfg.get("logger"))
     # setup model watching
     for _logger in logger:
-        if isinstance(_logger, WandbLogger):
+        if isinstance(_logger, WandbLogger) and cfg.action in {"fit", "finetune"}:
             _logger.watch(model, log="all")
 
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")

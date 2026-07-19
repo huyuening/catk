@@ -21,6 +21,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from src.smart.metrics import (
     CrossEntropy,
+    FastWOSACMetrics,
     TokenCls,
     WOSACMetrics,
     WOSACSubmission,
@@ -55,7 +56,28 @@ class SMART(LightningModule):
 
         self.minADE = minADE()
         self.TokenCls = TokenCls(max_guesses=5)
-        self.wosac_metrics = WOSACMetrics("val_closed")
+        self.wosac_backend = model_config.get("wosac_backend", "official")
+        self.wosac_metrics_version = str(
+            model_config.get("wosac_metrics_version", "2024")
+        )
+        if self.wosac_backend == "fast":
+            self.wosac_metrics = FastWOSACMetrics(
+                "val_closed",
+                trajtok_root=model_config.get(
+                    "trajtok_root", "/root/workspace/TrajTok"
+                ),
+                version=self.wosac_metrics_version,
+                gt_scenario_dir=model_config.get("fast_wosac_gt_dir"),
+            )
+        elif self.wosac_backend == "official":
+            if self.wosac_metrics_version != "2024":
+                raise ValueError(
+                    "CatK's official WOSAC backend only supports version 2024. "
+                    "Use wosac_backend=fast for WOSAC 2025."
+                )
+            self.wosac_metrics = WOSACMetrics("val_closed")
+        else:
+            raise ValueError(f"Unknown WOSAC backend: {self.wosac_backend}")
         self.wosac_submission = WOSACSubmission(**model_config.wosac_submission)
         self.training_loss = CrossEntropy(**model_config.training_loss)
 
@@ -169,11 +191,53 @@ class SMART(LightningModule):
                 )
 
                 # WOSAC metrics
-                if batch_idx < self.n_batch_wosac_metric:
-                    device = pred_traj.device
+                should_compute_wosac = (
+                    self.n_batch_wosac_metric < 0
+                    or batch_idx < self.n_batch_wosac_metric
+                )
+                if should_compute_wosac:
+                    if self.wosac_backend == "fast":
+                        # CatK keeps agents first; TrajTok Fast WOSAC expects
+                        # [n_rollout, n_agent, n_step, (x, y, z, yaw)].
+                        simulated_states = torch.cat(
+                            [
+                                pred_traj,
+                                pred_z.unsqueeze(-1),
+                                pred_head.unsqueeze(-1),
+                            ],
+                            dim=-1,
+                        ).permute(1, 0, 2, 3).contiguous()
+                        self.wosac_metrics.update(
+                            scenario_files=data["tfrecord_path"],
+                            scenario_ids=data["scenario_id"],
+                            agent_id=data["agent"]["id"],
+                            agent_batch=data["agent"]["batch"],
+                            simulated_states=simulated_states,
+                        )
+                    else:
+                        device = pred_traj.device
+                        scenario_rollouts = get_scenario_rollouts(
+                            scenario_id=get_scenario_id_int_tensor(
+                                data["scenario_id"], device
+                            ),
+                            agent_id=data["agent"]["id"],
+                            agent_batch=data["agent"]["batch"],
+                            pred_traj=pred_traj,
+                            pred_z=pred_z,
+                            pred_head=pred_head,
+                        )
+                        self.wosac_metrics.update(
+                            data["tfrecord_path"], scenario_rollouts
+                        )
+
+                if (
+                    self.wosac_backend == "fast"
+                    and self.global_rank == 0
+                    and batch_idx < self.n_vis_batch
+                ):
                     scenario_rollouts = get_scenario_rollouts(
                         scenario_id=get_scenario_id_int_tensor(
-                            data["scenario_id"], device
+                            data["scenario_id"], pred_traj.device
                         ),
                         agent_id=data["agent"]["id"],
                         agent_batch=data["agent"]["batch"],
@@ -181,7 +245,6 @@ class SMART(LightningModule):
                         pred_z=pred_z,
                         pred_head=pred_head,
                     )
-                    self.wosac_metrics.update(data["tfrecord_path"], scenario_rollouts)
 
             # ! visualization
             if self.global_rank == 0 and batch_idx < self.n_vis_batch:
@@ -209,7 +272,21 @@ class SMART(LightningModule):
                     epoch_wosac_metrics["epoch"] = (
                         self.log_epoch if self.log_epoch >= 0 else self.current_epoch
                     )
-                    self.logger.log_metrics(epoch_wosac_metrics)
+                    metric_lines = [
+                        f"WOSAC {self.wosac_metrics_version} validation metrics:"
+                    ]
+                    for metric_name, metric_value in sorted(
+                        epoch_wosac_metrics.items()
+                    ):
+                        if isinstance(metric_value, torch.Tensor):
+                            metric_value = metric_value.detach().cpu().item()
+                        if isinstance(metric_value, float):
+                            metric_lines.append(f"  {metric_name}: {metric_value:.8f}")
+                        else:
+                            metric_lines.append(f"  {metric_name}: {metric_value}")
+                    self.print("\n".join(metric_lines))
+                    if self.logger is not None:
+                        self.logger.log_metrics(epoch_wosac_metrics)
 
                 self.wosac_metrics.reset()
                 self.minADE.reset()
