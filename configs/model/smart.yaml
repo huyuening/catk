@@ -47,6 +47,35 @@ model_config:
     time_span: 30
     num_historical_steps: 11
     num_future_steps: 80
+    # Inference-only 2 Hz endpoint -> 10 Hz post-reconstruction from TrajTok.
+    endpoint_interpolation:
+      is_active: false
+      method: global_cubic
+      heading_method: endpoint_cubic
+      min_segment_distance_m: 0.25
+      heading_alignment_threshold_deg: 75.0
+      moving_only: true
+      moving_speed_threshold_mps: 0.5
+      moving_segment_only: true
+      moving_segment_speed_threshold_mps: 0.5
+      low_speed_reconstruction: true
+      low_speed_min_segment_threshold_mps: 0.1
+      low_speed_heading_method: endpoint_smoothstep
+      static_reconstruction: true
+      static_max_segment_speed_threshold_mps: 0.5
+      static_endpoint_span_threshold_m: 1.0
+      static_pedestrian_max_segment_speed_threshold_mps: 0.2
+      static_pedestrian_endpoint_span_threshold_m: 0.5
+      static_cyclist_max_segment_speed_threshold_mps: 0.3
+      static_cyclist_endpoint_span_threshold_m: 0.7
+      smooth_output: true
+      smooth_moving_agents_only: true
+      xy_smoothing_window: 11
+      xy_smoothing_iterations: 0
+      heading_smoothing_window: 15
+      heading_smoothing_iterations: 0
+      smooth_preserve_start_steps: 5
+      smooth_start_transition_steps: 5
   wosac_submission:
     is_active: false
     method_name: "SMART-tiny-CLSFT"

@@ -1,0 +1,13 @@
+# @package _global_
+
+# Reuse the full Fast WOSAC 2025 validation protocol and change only the
+# inference-time trajectory reconstruction.
+defaults:
+  - inference
+  - _self_
+
+model:
+  model_config:
+    decoder:
+      endpoint_interpolation:
+        is_active: true

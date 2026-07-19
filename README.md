@@ -128,6 +128,26 @@ python run.py \
 
 TrajTok Fast WOSAC is intended for rapid local evaluation. Use the official WOSAC evaluation server for final competition results.
 
+#### Pre-BC + endpoint interpolation
+
+CatK also includes TrajTok's inference-only `endpoint_interpolation` post-reconstruction. It rebuilds the 10 Hz points from CatK's generated 2 Hz token endpoints, with separate handling for moving, low-speed, and static agents. It does not change token selection, model weights, or training, and is disabled by default.
+
+Evaluate the same pre-BC checkpoint with the post-reconstruction enabled:
+
+```
+CATK_CKPT=/path/to/pre_bc.ckpt \
+python run.py experiment=inference_post_interp task_name=pre_bc_post_interp
+```
+
+For a paired comparison, run the baseline with the same checkpoint, validation data, and seed:
+
+```
+CATK_CKPT=/path/to/pre_bc.ckpt \
+python run.py experiment=inference task_name=pre_bc_baseline
+```
+
+Both commands use Fast WOSAC 2025, the complete validation split, 32 rollouts, inference `K=48`, and all visible GPUs. The terminal and W&B run contain `val_closed/wosac/realism_meta_metric` and all component metrics. The endpoint method and thresholds can be overridden under `model.model_config.decoder.endpoint_interpolation`.
+
 To reproduce our final results, you should follow the following steps
 1. Use [scripts/train.sh](scripts/train.sh) with the [BC pre-training config](configs/experiment/pre_bc.yaml) to pre-train the SMART-tiny 7M model.
 2. Use [scripts/train.sh](scripts/train.sh) with the [CLSFT with CAT-K config](configs/experiment/clsft.yaml) to fine-tune the SMART-tiny model pre-trained in step 1.

@@ -22,6 +22,7 @@ from torch_geometric.utils import dense_to_sparse, subgraph
 from src.smart.layers import MLPLayer
 from src.smart.layers.attention_layer import AttentionLayer
 from src.smart.layers.fourier_embedding import FourierEmbedding, MLPEmbedding
+from src.smart.modules.endpoint_interpolation import EndpointInterpolator
 from src.smart.utils import (
     angle_between_2d_vectors,
     sample_next_token_traj,
@@ -48,6 +49,7 @@ class SMARTAgentDecoder(nn.Module):
         dropout: float,
         hist_drop_prob: float,
         n_token_agent: int,
+        endpoint_interpolation: Optional[DictConfig] = None,
     ) -> None:
         super(SMARTAgentDecoder, self).__init__()
         self.hidden_dim = hidden_dim
@@ -59,6 +61,10 @@ class SMARTAgentDecoder(nn.Module):
         self.num_layers = num_layers
         self.shift = 5
         self.hist_drop_prob = hist_drop_prob
+        self.endpoint_interpolator = EndpointInterpolator(
+            config=endpoint_interpolation,
+            shift=self.shift,
+        )
 
         input_dim_x_a = 2
         input_dim_r_t = 4
@@ -497,6 +503,14 @@ class SMARTAgentDecoder(nn.Module):
                 [n_agent, n_step_future_10hz], dtype=pos_a.dtype, device=pos_a.device
             )
 
+        use_endpoint_interpolation = (
+            not self.training and self.endpoint_interpolator.is_active
+        )
+        interpolation_start_pos = pos_a[:, -1].clone()
+        interpolation_start_head = head_a[:, -1].clone()
+        interpolation_endpoint_pos = []
+        interpolation_endpoint_head = []
+
         pred_valid = tokenized_agent["valid_mask"].clone()
         next_token_logits_list = []
         next_token_action_list = []
@@ -669,6 +683,9 @@ class SMARTAgentDecoder(nn.Module):
             pos_a_next = token_traj_global[:, -1].mean(dim=1)
             diff_xy_next = token_traj_global[:, -1, 0] - token_traj_global[:, -1, 3]
             head_a_next = torch.arctan2(diff_xy_next[:, 1], diff_xy_next[:, 0])
+            if use_endpoint_interpolation:
+                interpolation_endpoint_pos.append(pos_a_next)
+                interpolation_endpoint_head.append(head_a_next)
             pred_idx[:, n_step] = next_token_idx
 
             # ! update tensors for for next step
@@ -715,6 +732,19 @@ class SMARTAgentDecoder(nn.Module):
             feat_a_next = torch.cat((agent_token_emb_next, x_a), dim=-1).unsqueeze(1)
             feat_a_next = self.fusion_emb(feat_a_next)
             feat_a = torch.cat([feat_a, feat_a_next], dim=1)
+
+        if use_endpoint_interpolation:
+            endpoint_pos = torch.stack(interpolation_endpoint_pos, dim=1)
+            endpoint_head = torch.stack(interpolation_endpoint_head, dim=1)
+            pred_traj_10hz, pred_head_10hz = self.endpoint_interpolator.reconstruct(
+                raw_traj=pred_traj_10hz,
+                raw_head=pred_head_10hz,
+                start_pos=interpolation_start_pos,
+                start_head=interpolation_start_head,
+                endpoint_pos=endpoint_pos,
+                endpoint_head=endpoint_head,
+                agent_type=tokenized_agent["type"],
+            )
 
         out_dict = {
             # action that goes from [(10->15), ..., (85->90)]

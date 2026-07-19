@@ -40,6 +40,7 @@ class SMARTDecoder(nn.Module):
         dropout: float,
         hist_drop_prob: float,
         n_token_agent: int,
+        endpoint_interpolation: Optional[DictConfig] = None,
     ) -> None:
         super(SMARTDecoder, self).__init__()
         self.map_encoder = SMARTMapDecoder(
@@ -65,6 +66,7 @@ class SMARTDecoder(nn.Module):
             dropout=dropout,
             hist_drop_prob=hist_drop_prob,
             n_token_agent=n_token_agent,
+            endpoint_interpolation=endpoint_interpolation,
         )
 
     def forward(
