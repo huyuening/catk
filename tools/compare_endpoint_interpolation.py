@@ -16,7 +16,8 @@
 
 The selected validation agent is shown in the same six-panel diagnostic used
 by TrajTok: XY, heading, linear speed/acceleration, and angular
-speed/acceleration. Both passes use the same checkpoint, seed, and token path.
+speed/acceleration. CatK generates one token path, then endpoint interpolation
+is applied offline to that exact rollout.
 """
 
 from __future__ import annotations
@@ -49,8 +50,8 @@ def parse_args():
     checkpoint_default = os.environ.get("CATK_CKPT")
     parser = argparse.ArgumentParser(
         description=(
-            "Generate one CatK scene twice with an identical token path and "
-            "compare raw 10 Hz token expansion against endpoint interpolation."
+            "Generate one CatK token path and compare its raw 10 Hz expansion "
+            "against offline endpoint interpolation."
         )
     )
     parser.add_argument(
@@ -283,7 +284,55 @@ def generate_rollouts(model, data, num_rollouts, seed):
                 )
             )
             rollout_tokens.append(pred["pred_idx"])
-    return torch.stack(rollout_states), torch.stack(rollout_tokens)
+    return (
+        torch.stack(rollout_states),
+        torch.stack(rollout_tokens),
+        tokenized_agent,
+    )
+
+
+def reconstruct_rollouts_from_endpoints(model, raw_states, tokenized_agent):
+    """Postprocess one generated token path without running inference again."""
+    decoder = model.encoder.agent_encoder
+    interpolator = decoder.endpoint_interpolator
+    shift = int(decoder.shift)
+    n_rollout, n_agent, n_step, _ = raw_states.shape
+    if n_step % shift != 0:
+        raise ValueError(
+            f"Future length {n_step} is not divisible by token stride {shift}."
+        )
+
+    step_current_2hz = (int(decoder.num_historical_steps) - 1) // shift
+    start_index = step_current_2hz - 1
+    start_pos = tokenized_agent["gt_pos"][:, start_index]
+    start_head = tokenized_agent["gt_heading"][:, start_index]
+    agent_type = tokenized_agent["type"]
+
+    def repeat_for_rollouts(values):
+        return (
+            values.unsqueeze(0)
+            .expand(n_rollout, *values.shape)
+            .reshape(n_rollout * n_agent, *values.shape[1:])
+        )
+
+    raw_traj = raw_states[..., :2].reshape(n_rollout * n_agent, n_step, 2)
+    raw_head = raw_states[..., 3].reshape(n_rollout * n_agent, n_step)
+    endpoint_pos = raw_traj[:, shift - 1 :: shift]
+    endpoint_head = raw_head[:, shift - 1 :: shift]
+    post_traj, post_head = interpolator.reconstruct(
+        raw_traj=raw_traj,
+        raw_head=raw_head,
+        start_pos=repeat_for_rollouts(start_pos),
+        start_head=repeat_for_rollouts(start_head),
+        endpoint_pos=endpoint_pos,
+        endpoint_head=endpoint_head,
+        agent_type=repeat_for_rollouts(agent_type),
+    )
+
+    post_states = raw_states.clone()
+    post_states[..., :2] = post_traj.reshape(n_rollout, n_agent, n_step, 2)
+    post_states[..., 3] = post_head.reshape(n_rollout, n_agent, n_step)
+    return post_states
 
 
 def save_rollout(path, states, data):
@@ -338,11 +387,14 @@ def history_gt_states(data, num_historical_steps):
     return output
 
 
-def motion_split_summary(model, data, raw_states, token_stride=5):
+def motion_split_summary(
+    model, data, raw_states, token_stride=5, tokenized_agent=None
+):
     import torch
 
-    with torch.no_grad():
-        _, tokenized_agent = model.token_processor(data)
+    if tokenized_agent is None:
+        with torch.no_grad():
+            _, tokenized_agent = model.token_processor(data)
     decoder = model.encoder.agent_encoder
     interpolator = decoder.endpoint_interpolator
     step_current_2hz = (decoder.num_historical_steps - 1) // decoder.shift
@@ -581,20 +633,21 @@ def main():
     )
 
     set_endpoint_interpolation_active(model, False)
-    raw_states_t, raw_tokens = generate_rollouts(
+    raw_states_t, _raw_tokens, tokenized_agent = generate_rollouts(
         model, data, args.num_rollouts, args.seed
     )
+    # A second autoregressive GPU pass need not be bitwise reproducible even
+    # after resetting RNG state. Reconstruct directly from the first pass so
+    # raw and postprocessed trajectories share exactly the same token path.
     set_endpoint_interpolation_active(model, True)
-    post_states_t, post_tokens = generate_rollouts(
-        model, data, args.num_rollouts, args.seed
-    )
-    if not torch.equal(raw_tokens, post_tokens):
-        mismatch = int((raw_tokens != post_tokens).sum().item())
-        raise RuntimeError(
-            "Raw and post-interpolation token paths differ despite seed reset: "
-            f"{mismatch} token indices mismatch. Comparison aborted."
+    with torch.no_grad():
+        post_states_t = reconstruct_rollouts_from_endpoints(
+            model, raw_states_t, tokenized_agent
         )
-    print("Token path check: identical")
+    print(
+        "Token path check: identical by construction "
+        "(one rollout, offline postprocessing)"
+    )
 
     raw_states = raw_states_t.detach().cpu().numpy().astype(np.float32)
     post_states = post_states_t.detach().cpu().numpy().astype(np.float32)
@@ -607,7 +660,12 @@ def main():
     agent_types = data["agent"]["type"].long().detach().cpu().numpy()
     raw_rollout = raw_states[args.rollout_index]
     post_rollout = post_states[args.rollout_index]
-    split_summary = motion_split_summary(model, data, raw_states)
+    split_summary = motion_split_summary(
+        model,
+        data,
+        raw_states,
+        tokenized_agent=tokenized_agent,
+    )
 
     candidate_mask = None
     if (
@@ -710,6 +768,7 @@ def main():
         "num_rollouts": args.num_rollouts,
         "rollout_index": args.rollout_index,
         "token_paths_identical": True,
+        "comparison_method": "single_rollout_offline_postprocessing",
         "selected_agent": {
             "index": agent_index,
             "id": selected_agent_id,

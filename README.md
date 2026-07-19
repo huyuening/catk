@@ -148,7 +148,7 @@ python run.py experiment=inference task_name=pre_bc_baseline
 
 Both commands use Fast WOSAC 2025, the complete validation split, 32 rollouts, inference `K=48`, and all visible GPUs. The terminal and W&B run contain `val_closed/wosac/realism_meta_metric` and all component metrics. The endpoint method and thresholds can be overridden under `model.model_config.decoder.endpoint_interpolation`.
 
-To inspect one validation scenario and one agent, use the CatK comparison tool. It runs raw token expansion and endpoint interpolation with the same checkpoint, seed, and token indices, then reuses TrajTok's original six-panel plot for XY trajectory, heading, linear speed, linear acceleration, angular speed, and angular acceleration:
+To inspect one validation scenario and one agent, use the CatK comparison tool. It generates one CatK token path, applies endpoint interpolation offline to that exact rollout, then reuses TrajTok's original six-panel plot for XY trajectory, heading, linear speed, linear acceleration, angular speed, and angular acceleration:
 
 ```
 CATK_CKPT=/path/to/pre_bc.ckpt \
@@ -168,7 +168,7 @@ python tools/compare_endpoint_interpolation.py \
   --agent-id AGENT_ID
 ```
 
-Use `--select-motion-mode endpoint_interpolation`, `low_speed_reconstruction`, or `static_reconstruction` to automatically select an agent from one postprocessing branch. Outputs are written under `outputs/catk_endpoint_interpolation_check`: a six-panel PNG, per-step CSV, raw/post-interpolation rollout PKLs, and a JSON summary. The default sampling `K=1` gives the clearest deterministic comparison; set `--sampling-num-k 48` to use the validation sampling width. The tool aborts if the raw and post-interpolation token paths differ.
+Use `--select-motion-mode endpoint_interpolation`, `low_speed_reconstruction`, or `static_reconstruction` to automatically select an agent from one postprocessing branch. Outputs are written under `outputs/catk_endpoint_interpolation_check`: a six-panel PNG, per-step CSV, raw/post-interpolation rollout PKLs, and a JSON summary. The default sampling `K=1` gives the clearest deterministic comparison; set `--sampling-num-k 48` to use the validation sampling width. Raw and post-interpolation outputs share one generated token path by construction.
 
 To reproduce our final results, you should follow the following steps
 1. Use [scripts/train.sh](scripts/train.sh) with the [BC pre-training config](configs/experiment/pre_bc.yaml) to pre-train the SMART-tiny 7M model.

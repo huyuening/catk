@@ -13,10 +13,58 @@ from tools.compare_endpoint_interpolation import (
     build_cfg,
     endpoint_delta_summary,
     motion_split_summary,
+    reconstruct_rollouts_from_endpoints,
 )
 
 
 class EndpointComparisonTest(unittest.TestCase):
+    def test_offline_reconstruction_reuses_one_rollout(self):
+        interpolator = EndpointInterpolator(
+            config={
+                "is_active": True,
+                "method": "global_cubic",
+                "heading_method": "endpoint_cubic",
+                "moving_only": False,
+                "moving_segment_only": False,
+                "low_speed_reconstruction": False,
+                "smooth_output": False,
+            },
+            shift=5,
+        )
+        decoder = SimpleNamespace(
+            shift=5,
+            num_historical_steps=11,
+            endpoint_interpolator=interpolator,
+        )
+        model = SimpleNamespace(encoder=SimpleNamespace(agent_encoder=decoder))
+        tokenized_agent = {
+            "gt_pos": torch.tensor(
+                [[[0.0, 0.0], [0.0, 0.0]], [[10.0, 0.0], [10.0, 0.0]]]
+            ),
+            "gt_heading": torch.zeros(2, 2),
+            "type": torch.tensor([0, 0]),
+        }
+        raw = torch.zeros(2, 2, 10, 4)
+        raw[..., 2] = 3.0
+        for rollout in range(2):
+            for agent in range(2):
+                start_x = float(agent * 10)
+                raw[rollout, agent, 4, 0] = start_x + 5.0 + rollout
+                raw[rollout, agent, 9, 0] = start_x + 10.0 + rollout
+                raw[rollout, agent, 4, 3] = 0.1 * (agent + 1)
+                raw[rollout, agent, 9, 3] = 0.2 * (rollout + 1)
+        raw_before = raw.clone()
+
+        post = reconstruct_rollouts_from_endpoints(model, raw, tokenized_agent)
+
+        self.assertTrue(torch.equal(raw, raw_before))
+        self.assertTrue(torch.equal(post[..., 4::5, :2], raw[..., 4::5, :2]))
+        self.assertTrue(
+            torch.allclose(post[..., 4::5, 3], raw[..., 4::5, 3], atol=1e-6)
+        )
+        self.assertTrue(torch.equal(post[..., 2], raw[..., 2]))
+        self.assertFalse(torch.equal(post[..., :2], raw[..., :2]))
+
     def test_build_cfg_initializes_standalone_hydra_runtime(self):
         try:
             from hydra.core.hydra_config import HydraConfig
