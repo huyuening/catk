@@ -10,12 +10,42 @@ import torch
 
 from src.smart.modules.endpoint_interpolation import EndpointInterpolator
 from tools.compare_endpoint_interpolation import (
+    build_cfg,
     endpoint_delta_summary,
     motion_split_summary,
 )
 
 
 class EndpointComparisonTest(unittest.TestCase):
+    def test_build_cfg_initializes_standalone_hydra_runtime(self):
+        try:
+            from hydra.core.hydra_config import HydraConfig
+            from omegaconf import OmegaConf
+        except ModuleNotFoundError:
+            self.skipTest("Hydra is not installed in this test environment")
+
+        with tempfile.TemporaryDirectory() as output_directory:
+            args = SimpleNamespace(
+                config_overrides=[],
+                output_dir=output_directory,
+                num_rollouts=1,
+                trajtok_root="/root/workspace/TrajTok",
+                sampling_num_k=1,
+                sampling_temp=1.0,
+            )
+            cfg = build_cfg(args)
+            resolved_paths = OmegaConf.to_container(cfg.paths, resolve=True)
+
+            self.assertTrue(HydraConfig.initialized())
+            self.assertEqual(
+                Path(HydraConfig.get().runtime.output_dir),
+                Path(output_directory).resolve(),
+            )
+            self.assertEqual(
+                Path(resolved_paths["output_dir"]),
+                Path(output_directory).resolve(),
+            )
+
     def test_script_adds_repository_root_when_launched_elsewhere(self):
         repo_root = Path(__file__).resolve().parents[1]
         script_path = repo_root / "tools" / "compare_endpoint_interpolation.py"

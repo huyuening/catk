@@ -133,15 +133,27 @@ def resolve_device(device_arg):
 
 def build_cfg(args):
     import hydra
+    from hydra.core.hydra_config import HydraConfig
     from omegaconf import open_dict
 
     overrides = ["experiment=inference", *args.config_overrides]
     with hydra.initialize_config_dir(
         config_dir=str(REPO_ROOT / "configs"), version_base=None
     ):
-        cfg = hydra.compose(config_name="run.yaml", overrides=overrides)
+        cfg = hydra.compose(
+            config_name="run.yaml",
+            overrides=overrides,
+            return_hydra_config=True,
+        )
 
     with open_dict(cfg):
+        # The Compose API does not create a Hydra job or populate its runtime
+        # state. SMART only needs these paths while being instantiated, so
+        # provide the equivalent standalone runtime explicitly.
+        cfg.hydra.runtime.cwd = str(Path.cwd().resolve())
+        cfg.hydra.runtime.output_dir = str(
+            Path(args.output_dir).expanduser().resolve()
+        )
         cfg.data.val_batch_size = 1
         cfg.data.test_batch_size = 1
         cfg.data.num_workers = 0
@@ -160,6 +172,8 @@ def build_cfg(args):
         sampling.num_k = args.sampling_num_k
         sampling.temp = args.sampling_temp
         cfg.model.model_config.decoder.endpoint_interpolation.is_active = False
+
+    HydraConfig.instance().set_config(cfg)
     return cfg
 
 
