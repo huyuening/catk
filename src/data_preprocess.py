@@ -16,16 +16,16 @@ import pickle
 from argparse import ArgumentParser
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 import torch
-from scipy.interpolate import interp1d
 from tqdm import tqdm
 from waymo_open_dataset.protos import scenario_pb2
 
+from src.agent_preprocessing import get_agent_features
 from src.smart.utils.geometry import wrap_angle
 from src.smart.utils.preprocess import get_polylines_from_polygon, preprocess_map
 
@@ -55,75 +55,6 @@ _polygon_light_type = [
     "LANE_STATE_GO",
     "LANE_STATE_CAUTION",
 ]
-
-
-def get_agent_features(
-    track_infos: Dict[str, np.ndarray], split, num_historical_steps, num_steps
-) -> Dict[str, Any]:
-    """
-    track_infos:
-    object_id (100,) int64
-    object_type (100,) uint8
-    states (100, 91, 9) float32
-    valid (100, 91) bool
-    role (100, 3) bool
-    """
-
-    idx_agents_to_add = []
-    for i in range(len(track_infos["object_id"])):
-        add_agent = track_infos["valid"][i, num_historical_steps - 1]
-
-        if add_agent:
-            idx_agents_to_add.append(i)
-
-    num_agents = len(idx_agents_to_add)
-    out_dict = {
-        "num_nodes": num_agents,
-        "valid_mask": torch.zeros([num_agents, num_steps], dtype=torch.bool),
-        "role": torch.zeros([num_agents, 3], dtype=torch.bool),
-        "id": torch.zeros(num_agents, dtype=torch.int64) - 1,
-        "type": torch.zeros(num_agents, dtype=torch.uint8),
-        "position": torch.zeros([num_agents, num_steps, 3], dtype=torch.float32),
-        "heading": torch.zeros([num_agents, num_steps], dtype=torch.float32),
-        "velocity": torch.zeros([num_agents, num_steps, 2], dtype=torch.float32),
-        "shape": torch.zeros([num_agents, 3], dtype=torch.float32),
-    }
-
-    for i, idx in enumerate(idx_agents_to_add):
-
-        out_dict["role"][i] = torch.from_numpy(track_infos["role"][idx])
-        out_dict["id"][i] = track_infos["object_id"][idx]
-        out_dict["type"][i] = track_infos["object_type"][idx]
-
-        valid = track_infos["valid"][idx]  # [n_step]
-        states = track_infos["states"][idx]
-
-        object_shape = states[:, 3:6]  # [n_step, 3], length, width, height
-        object_shape = object_shape[valid].mean(axis=0)  # [3]
-        out_dict["shape"][i] = torch.from_numpy(object_shape)
-
-        valid_steps = np.where(valid)[0]
-        position = states[:, :3]  # [n_step, dim], x, y, z
-        velocity = states[:, 7:9]  # [n_step, 2], vx, vy
-        heading = states[:, 6]  # [n_step], heading
-        if valid.sum() > 1:
-            t_start, t_end = valid_steps[0], valid_steps[-1]
-            f_pos = interp1d(valid_steps, position[valid], axis=0)
-            f_vel = interp1d(valid_steps, velocity[valid], axis=0)
-            f_yaw = interp1d(valid_steps, np.unwrap(heading[valid], axis=0), axis=0)
-            t_in = np.arange(t_start, t_end + 1)
-            out_dict["valid_mask"][i, t_start : t_end + 1] = True
-            out_dict["position"][i, t_start : t_end + 1] = torch.from_numpy(f_pos(t_in))
-            out_dict["velocity"][i, t_start : t_end + 1] = torch.from_numpy(f_vel(t_in))
-            out_dict["heading"][i, t_start : t_end + 1] = torch.from_numpy(f_yaw(t_in))
-        else:
-            t = valid_steps[0]
-            out_dict["valid_mask"][i, t] = True
-            out_dict["position"][i, t] = torch.from_numpy(position[t])
-            out_dict["velocity"][i, t] = torch.from_numpy(velocity[t])
-            out_dict["heading"][i, t] = torch.tensor(heading[t])
-
-    return out_dict
 
 
 def get_map_features(map_infos, tf_current_light, dim=2):

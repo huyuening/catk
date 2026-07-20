@@ -98,9 +98,19 @@ if __name__ == "__main__":
 
             for data in dataloader:
                 valid_mask = data["agent"]["valid_mask"]
-                data["agent"]["heading"] = TokenProcessor._clean_heading(
-                    valid_mask, data["agent"]["heading"]
+                trajectory_reconstructed = data["agent"].get(
+                    "trajectory_reconstructed", None
                 )
+                heading = data["agent"]["heading"].clone()
+                if trajectory_reconstructed is None:
+                    heading = TokenProcessor._clean_heading(valid_mask, heading)
+                else:
+                    raw_mask = ~trajectory_reconstructed.bool()
+                    if raw_mask.any():
+                        heading[raw_mask] = TokenProcessor._clean_heading(
+                            valid_mask[raw_mask], heading[raw_mask]
+                        )
+                data["agent"]["heading"] = heading
 
                 for i_ag in range(valid_mask.shape[0]):
                     if valid_mask[i_ag, :].sum() < 30:
