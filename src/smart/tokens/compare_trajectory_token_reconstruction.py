@@ -21,10 +21,10 @@ reduces disk use.  The agent dictionaries use the same keys, dtypes, history
 selection, interpolation, and 0.5 s segmentation rules as CatK.
 
 The original branch reproduces CatK's legacy linear gap interpolation and
-heading cleanup.  The reconstructed branch calls
-WOMD-Traffic-Signal-Data-Improvement once on the complete 91-frame training
-trajectory and skips those legacy repairs.  These caches are vocabulary sources
-only: they are never substituted for CatK model inputs or training labels.
+heading cleanup.  The reconstructed branch calls CatK's bundled geometric
+filter once on the complete 91-frame training trajectory and skips those legacy
+repairs.  These caches are vocabulary sources only: they are never substituted
+for CatK model inputs or training labels.
 """
 
 from __future__ import annotations
@@ -33,11 +33,12 @@ import argparse
 import csv
 import dataclasses
 import hashlib
-import importlib.util
+import importlib
 import json
 import math
 import os
 import pickle
+import re
 import shutil
 import sys
 import time
@@ -51,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Sequence
 
-# The bundled WOMD protobufs were generated with the Python protobuf runtime.
+# WOMD protobufs are loaded with the Python protobuf runtime for compatibility.
 # Set this before importing TensorFlow or protobuf modules.
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
@@ -71,7 +72,7 @@ CANONICAL_WIDTH_LENGTH = {
 
 @dataclass(frozen=True)
 class WorkerConfig:
-    reconstruction_root: str
+    reconstruction_root: str | None
     method: str
     filter_strength: str
     max_gap_frames: int
@@ -89,11 +90,34 @@ def parse_args() -> argparse.Namespace:
             "trajectory vocabularies, and visualize their differences."
         )
     )
-    parser.add_argument("--input-tfrecord", required=True)
-    parser.add_argument("--reconstruction-root", required=True)
+    parser.add_argument(
+        "--input-tfrecord",
+        "--input-path",
+        dest="input_tfrecord",
+        required=True,
+        help="One WOMD TFRecord shard or a directory containing training shards.",
+    )
+    parser.add_argument(
+        "--reconstruction-root",
+        default=None,
+        help=(
+            "Optional WOMD-Traffic-Signal-Data-Improvement checkout. The "
+            "default filter method is bundled with CatK; this is required "
+            "only for batch or optimizer."
+        ),
+    )
     parser.add_argument(
         "--output-dir",
         default="outputs/trajectory_token_reconstruction_comparison",
+    )
+    parser.add_argument(
+        "--vocab-output-dir",
+        default="src/smart/tokens",
+        help="Directory receiving the final CatK-compatible reconstructed vocabulary.",
+    )
+    parser.add_argument(
+        "--vocab-output-name",
+        default="agent_vocab_reconstructed.pkl",
     )
     parser.add_argument(
         "--stage", choices=("all", "preprocess", "cluster"), default="all"
@@ -183,42 +207,24 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _load_scenario_class(reconstruction_root: str):
-    pb2_root = (
-        Path(reconstruction_root).expanduser().resolve()
-        / "src"
-        / "womd_proto"
-        / "pb2"
-    )
-    scenario_path = pb2_root / "scenario_pb2.py"
-    if not scenario_path.is_file():
-        raise FileNotFoundError(f"Bundled WOMD protobuf not found: {scenario_path}")
-    pb2_root_string = str(pb2_root)
-    if pb2_root_string not in sys.path:
-        sys.path.insert(0, pb2_root_string)
-    import scenario_pb2  # type: ignore
+def _load_scenario_class():
+    try:
+        from waymo_open_dataset.protos import scenario_pb2
+    except ModuleNotFoundError:
+        pb2_root = REPO_ROOT / "src" / "smart" / "tokens" / "womd_proto" / "pb2"
+        pb2_root_string = str(pb2_root)
+        if pb2_root_string not in sys.path:
+            sys.path.insert(0, pb2_root_string)
+        scenario_pb2 = importlib.import_module("scenario_pb2")
 
     return scenario_pb2.Scenario
 
 
 def _load_catk_reconstruction_bridge():
-    bridge_path = (
-        REPO_ROOT
-        / "src"
-        / "smart"
-        / "tokens"
-        / "womd_trajectory_reconstruction.py"
-    )
-    module_name = "_catk_comparison_reconstruction_bridge"
-    module = sys.modules.get(module_name)
-    if module is None:
-        spec = importlib.util.spec_from_file_location(module_name, bridge_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"Could not load reconstruction bridge: {bridge_path}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-    return module
+    repo_root = str(REPO_ROOT)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    return importlib.import_module("src.smart.tokens.womd_trajectory_reconstruction")
 
 
 def _wrap_angle(angle: np.ndarray | float) -> np.ndarray:
@@ -388,7 +394,7 @@ def _scenario_type_counts(cache: Mapping[str, Any]) -> Dict[str, int]:
 
 def _process_scenario_task(task: tuple[int, bytes, WorkerConfig]) -> Dict[str, Any]:
     index, record_bytes, config = task
-    scenario_class = _load_scenario_class(config.reconstruction_root)
+    scenario_class = _load_scenario_class()
     scenario = scenario_class()
     scenario.ParseFromString(record_bytes)
 
@@ -444,7 +450,7 @@ def _prepare_output_for_preprocessing(output_dir: Path, force: bool) -> None:
         output_dir / "datasets" / "original" / "training",
         output_dir / "datasets" / "reconstructed" / "training",
         output_dir / "manifest.csv",
-        output_dir / "tfrecords" / "reconstructed" / "training.tfrecord-00000-of-01000",
+        output_dir / "tfrecords",
     ]
     existing = [path for path in watched if path.exists()]
     if existing and not force:
@@ -454,11 +460,10 @@ def _prepare_output_for_preprocessing(output_dir: Path, force: bool) -> None:
             f"to reuse it or --force to replace it:\n  {joined}"
         )
     if force:
-        for directory in watched[:2]:
-            if directory.is_dir():
-                shutil.rmtree(directory)
-        for path in watched[2:]:
-            if path.is_file():
+        for path in watched:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.is_file():
                 path.unlink()
 
 
@@ -474,16 +479,95 @@ def _link_or_copy(source: Path, destination: Path) -> str:
         return "copy"
 
 
-def _record_iterator(path: Path, max_scenarios: int | None) -> Iterator[tuple[int, bytes]]:
+_TFRECORD_SHARD_PATTERN = re.compile(
+    r"(?P<prefix>.*\.tfrecord)-(?P<index>\d+)-of-(?P<count>\d+)$"
+)
+
+
+def _resolve_input_tfrecords(input_path: Path) -> list[Path]:
+    """Resolve one shard or a sorted training directory without audit copies."""
+
+    input_path = input_path.expanduser().resolve()
+    if input_path.is_file():
+        return [input_path]
+    if not input_path.is_dir():
+        raise FileNotFoundError(input_path)
+
+    paths = sorted(
+        path
+        for path in input_path.iterdir()
+        if path.is_file()
+        and (
+            path.name.endswith(".tfrecord")
+            or _TFRECORD_SHARD_PATTERN.fullmatch(path.name) is not None
+        )
+    )
+    shard_groups: Dict[str, list[Path]] = {}
+    for path in paths:
+        match = _TFRECORD_SHARD_PATTERN.fullmatch(path.name)
+        if match is not None:
+            shard_groups.setdefault(match.group("prefix"), []).append(path)
+    preferred_prefix = f"{input_path.name}.tfrecord"
+    if preferred_prefix in shard_groups:
+        paths = shard_groups[preferred_prefix]
+    elif shard_groups:
+        _, paths = max(
+            sorted(shard_groups.items()),
+            key=lambda item: len(item[1]),
+        )
+    if not paths:
+        raise FileNotFoundError(
+            f"No TFRecord shards found directly under {input_path}"
+        )
+    return paths
+
+
+def _record_iterator(
+    paths: Sequence[Path], max_scenarios: int | None
+) -> Iterator[tuple[int, bytes]]:
     import tensorflow as tf
 
     dataset = tf.data.TFRecordDataset(
-        [str(path)], compression_type="", num_parallel_reads=1
+        [str(path) for path in paths], compression_type="", num_parallel_reads=1
     )
     for index, value in enumerate(dataset):
         if max_scenarios is not None and index >= max_scenarios:
             break
         yield index, bytes(value.numpy())
+
+
+def _reconstructed_tfrecord_path(output_dir: Path, input_path: Path) -> Path:
+    name = (
+        input_path.name
+        if input_path.is_file()
+        else f"{input_path.name}_reconstructed.tfrecord"
+    )
+    return output_dir / "tfrecords" / "reconstructed" / name
+
+
+def _record_original_inputs(
+    input_path: Path,
+    input_tfrecords: Sequence[Path],
+    output_dir: Path,
+) -> str:
+    """Record inputs without duplicating a complete multi-shard dataset."""
+
+    original_dir = output_dir / "tfrecords" / "original"
+    original_dir.mkdir(parents=True, exist_ok=True)
+    if len(input_tfrecords) == 1:
+        return _link_or_copy(
+            input_tfrecords[0], original_dir / input_tfrecords[0].name
+        )
+
+    _write_json(
+        original_dir / "source_files.json",
+        {
+            "input_directory": str(input_path),
+            "shard_count": len(input_tfrecords),
+            "shards": [str(path) for path in input_tfrecords],
+        },
+    )
+    return "referenced"
 
 
 def _bounded_parallel_results(
@@ -536,13 +620,21 @@ def preprocess_dataset(args: argparse.Namespace, output_dir: Path) -> Dict[str, 
     from tqdm import tqdm
 
     input_path = Path(args.input_tfrecord).expanduser().resolve()
-    reconstruction_root = Path(args.reconstruction_root).expanduser().resolve()
-    if not input_path.is_file():
-        raise FileNotFoundError(input_path)
-    if not (reconstruction_root / "src" / "trajectory_reconstruction.py").is_file():
-        raise FileNotFoundError(
-            reconstruction_root / "src" / "trajectory_reconstruction.py"
-        )
+    input_tfrecords = _resolve_input_tfrecords(input_path)
+    reconstruction_root = (
+        str(Path(args.reconstruction_root).expanduser().resolve())
+        if args.reconstruction_root
+        else None
+    )
+    bridge = _load_catk_reconstruction_bridge()
+    bridge.TrajectoryReconstructionConfig(
+        method=args.method,
+        project_root=reconstruction_root,
+        filter_strength=args.filter_strength,
+        max_gap_frames=args.max_gap_frames,
+        batch_linear_jerk_weight=args.batch_linear_jerk_weight,
+        batch_angular_jerk_weight=args.batch_angular_jerk_weight,
+    )
     _prepare_output_for_preprocessing(output_dir, args.force)
 
     original_cache_dir = output_dir / "datasets" / "original" / "training"
@@ -550,13 +642,10 @@ def preprocess_dataset(args: argparse.Namespace, output_dir: Path) -> Dict[str, 
     original_cache_dir.mkdir(parents=True, exist_ok=True)
     reconstructed_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    original_tfrecord = (
-        output_dir / "tfrecords" / "original" / input_path.name
+    original_copy_mode = _record_original_inputs(
+        input_path, input_tfrecords, output_dir
     )
-    original_copy_mode = _link_or_copy(input_path, original_tfrecord)
-    reconstructed_tfrecord = (
-        output_dir / "tfrecords" / "reconstructed" / input_path.name
-    )
+    reconstructed_tfrecord = _reconstructed_tfrecord_path(output_dir, input_path)
     reconstructed_partial = reconstructed_tfrecord.with_suffix(
         reconstructed_tfrecord.suffix + ".partial"
     )
@@ -565,7 +654,7 @@ def preprocess_dataset(args: argparse.Namespace, output_dir: Path) -> Dict[str, 
         reconstructed_partial.unlink()
 
     worker_config = WorkerConfig(
-        reconstruction_root=str(reconstruction_root),
+        reconstruction_root=reconstruction_root,
         method=args.method,
         filter_strength=args.filter_strength,
         max_gap_frames=args.max_gap_frames,
@@ -577,10 +666,14 @@ def preprocess_dataset(args: argparse.Namespace, output_dir: Path) -> Dict[str, 
     )
 
     if args.num_workers > 1 and args.worker_backend == "thread":
-        # Avoid racing the first dynamic protobuf/module import across threads.
-        _load_scenario_class(str(reconstruction_root))
-        bridge = _load_catk_reconstruction_bridge()
-        bridge._load_reconstruction_entrypoint(str(reconstruction_root))
+        # Avoid racing first-time imports across worker threads.
+        _load_scenario_class()
+        if reconstruction_root:
+            bridge._load_reconstruction_entrypoint(reconstruction_root)
+        else:
+            importlib.import_module(
+                "src.smart.tokens.trajectory_filter_reconstructor"
+            )
 
     writer = None
     if args.write_reconstructed_tfrecord:
@@ -588,7 +681,7 @@ def preprocess_dataset(args: argparse.Namespace, output_dir: Path) -> Dict[str, 
 
         writer = tf.io.TFRecordWriter(str(reconstructed_partial))
 
-    records = _record_iterator(input_path, args.max_scenarios)
+    records = _record_iterator(input_tfrecords, args.max_scenarios)
     expected = args.max_scenarios
     manifest_rows = []
     started = time.perf_counter()
@@ -665,6 +758,7 @@ def _refresh_preprocessing_summary(
     """Build preprocessing metadata from the durable manifest and cache files."""
 
     input_path = Path(args.input_tfrecord).expanduser().resolve()
+    input_tfrecords = _resolve_input_tfrecords(input_path)
     manifest_path = output_dir / "manifest.csv"
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
@@ -678,16 +772,21 @@ def _refresh_preprocessing_summary(
     )
     _write_json(output_dir / "cache_validation.json", cache_validation)
 
-    reconstructed_tfrecord = (
-        output_dir / "tfrecords" / "reconstructed" / input_path.name
+    reconstructed_tfrecord = _reconstructed_tfrecord_path(output_dir, input_path)
+    original_reference = (
+        output_dir / "tfrecords" / "original" / input_tfrecords[0].name
+        if len(input_tfrecords) == 1
+        else output_dir / "tfrecords" / "original" / "source_files.json"
     )
     summary = {
-        "input_tfrecord": str(input_path),
-        "input_size_bytes": input_path.stat().st_size,
-        "input_sha256": _sha256(input_path),
-        "original_tfrecord": str(
-            output_dir / "tfrecords" / "original" / input_path.name
+        "input_path": str(input_path),
+        "input_tfrecord_count": len(input_tfrecords),
+        "input_tfrecords": [str(path) for path in input_tfrecords],
+        "input_size_bytes": int(sum(path.stat().st_size for path in input_tfrecords)),
+        "input_sha256": (
+            _sha256(input_tfrecords[0]) if len(input_tfrecords) == 1 else None
         ),
+        "original_tfrecord_reference": str(original_reference),
         "original_tfrecord_storage": original_tfrecord_storage,
         "reconstructed_tfrecord": (
             str(reconstructed_tfrecord)
@@ -699,6 +798,11 @@ def _refresh_preprocessing_summary(
             "method": args.method,
             "filter_strength": args.filter_strength,
             "max_gap_frames": args.max_gap_frames,
+            "implementation": (
+                "catk_bundled_filter"
+                if args.method == "filter" and not args.reconstruction_root
+                else "external"
+            ),
             "scope": "vocabulary_only",
             "uses_complete_training_trajectory": True,
             "model_inputs_reconstructed": False,
@@ -1058,6 +1162,16 @@ def _save_vocab(
     )
 
 
+def _vocab_export_path(args: argparse.Namespace) -> Path:
+    output_dir = Path(args.vocab_output_dir).expanduser()
+    if not output_dir.is_absolute():
+        output_dir = REPO_ROOT / output_dir
+    output_name = Path(args.vocab_output_name)
+    if output_name.name != str(output_name) or output_name.suffix != ".pkl":
+        raise ValueError("--vocab-output-name must be a .pkl file name")
+    return output_dir.resolve() / output_name.name
+
+
 def _axis_limits(arrays: Sequence[np.ndarray]) -> tuple[tuple[float, float], tuple[float, float]]:
     points = np.concatenate([array[:, :, :2].reshape(-1, 2) for array in arrays], axis=0)
     minimum = np.minimum(points.min(axis=0), 0.0)
@@ -1282,6 +1396,18 @@ def cluster_and_visualize(args: argparse.Namespace, output_dir: Path) -> Dict[st
             },
         )
 
+    vocab_export_path = _vocab_export_path(args)
+    _save_vocab(
+        vocab_export_path,
+        catk_compatible["reconstructed"],
+        {
+            **vocab_metadata,
+            "dataset": "reconstructed",
+            "vocabulary_scope": "catk_compatible_common_size",
+            "exported_for_catk": True,
+        },
+    )
+
     metrics = []
     for dataset in ("original", "reconstructed"):
         for class_index, key in enumerate(TYPE_KEYS):
@@ -1324,6 +1450,7 @@ def cluster_and_visualize(args: argparse.Namespace, output_dir: Path) -> Dict[st
             "reconstructed_analysis_vocab": str(
                 vocab_dir / "reconstructed_analysis_vocab.pkl"
             ),
+            "catk_vocab_export": str(vocab_export_path),
             "comparison_plot": str(output_dir / "token_vocab_comparison.png"),
         },
     }
@@ -1350,17 +1477,18 @@ def _write_output_readme(output_dir: Path, args: argparse.Namespace) -> None:
     lines = [
         "# CatK trajectory-token reconstruction comparison",
         "",
-        "This directory contains a matched comparison built from one real WOMD shard.",
+        "This directory contains a matched comparison built from real WOMD training shards.",
         "",
         "- `datasets/original/training`: agent-only CatK caches using legacy interpolation.",
         (
             "- `datasets/reconstructed/training`: agent-only, full-trajectory WOMD "
             "reconstruction used exclusively for vocabulary construction."
         ),
-        "- `tfrecords/original`: unchanged source shard (hard-linked when possible).",
+        "- `tfrecords/original`: source shard or a manifest of referenced shards.",
         reconstructed_tfrecord_line,
         "- `segments/trajectory_segments.npz`: local 0.5 s trajectories supplied to K-disk.",
         "- `vocab`: per-class analysis vocabularies plus common-size CatK-compatible vocabularies.",
+        f"- Final CatK vocabulary: `{_vocab_export_path(args)}`.",
         "- `metrics.csv`: coverage and smoothness metrics by agent class.",
         "- `*_tokens_comparison.png`: matched-scale trajectory-token plots.",
         "",
@@ -1375,9 +1503,18 @@ def _write_output_readme(output_dir: Path, args: argparse.Namespace) -> None:
             "conda run -n womd_tls python -m "
             "src.smart.tokens.compare_trajectory_token_reconstruction \\"
         ),
-        f"  --input-tfrecord {Path(args.input_tfrecord).expanduser().resolve()} \\",
-        f"  --reconstruction-root {Path(args.reconstruction_root).expanduser().resolve()} \\",
+        f"  --input-path {Path(args.input_tfrecord).expanduser().resolve()} \\",
+        *(
+            [
+                "  --reconstruction-root "
+                f"{Path(args.reconstruction_root).expanduser().resolve()} \\"
+            ]
+            if args.reconstruction_root
+            else []
+        ),
         f"  --output-dir {output_dir.resolve()} \\",
+        f"  --vocab-output-dir {_vocab_export_path(args).parent} \\",
+        f"  --vocab-output-name {_vocab_export_path(args).name} \\",
         f"  --method {args.method} --filter-strength {args.filter_strength} \\",
         f"  --num-workers {args.num_workers} --worker-backend {args.worker_backend} \\",
         num_cluster_line,

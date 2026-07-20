@@ -1,3 +1,4 @@
+import argparse
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,12 +8,42 @@ import numpy as np
 from src.smart.tokens.compare_trajectory_token_reconstruction import (
     _canonical_cache_paths,
     _local_segment,
+    _resolve_input_tfrecords,
+    _vocab_export_path,
     kdisk_cluster,
     polygon_contours,
 )
 
 
 class TrajectoryTokenComparisonTest(unittest.TestCase):
+    def test_input_directory_resolves_only_canonical_tfrecord_shards(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_dir = Path(temporary_directory) / "training"
+            input_dir.mkdir()
+            second = input_dir / "training.tfrecord-00001-of-01000"
+            first = input_dir / "training.tfrecord-00000-of-01000"
+            first.touch()
+            second.touch()
+            (input_dir / "training.tfrecord-00000-of-01000-new").touch()
+            (input_dir / "training_20s.tfrecord-00000-of-01000").touch()
+            (input_dir / "README.txt").touch()
+
+            self.assertEqual(
+                _resolve_input_tfrecords(input_dir),
+                [first.resolve(), second.resolve()],
+            )
+
+    def test_vocab_export_defaults_to_catk_token_directory(self):
+        args = argparse.Namespace(
+            vocab_output_dir="src/smart/tokens",
+            vocab_output_name="agent_vocab_reconstructed.pkl",
+        )
+
+        output_path = _vocab_export_path(args)
+
+        self.assertEqual(output_path.name, "agent_vocab_reconstructed.pkl")
+        self.assertEqual(output_path.parent.name, "tokens")
+
     def test_macos_conflict_copies_are_not_consumed_as_scenarios(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             cache_dir = Path(temporary_directory)

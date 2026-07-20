@@ -11,12 +11,11 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-"""Vocabulary-only bridge to WOMD-Traffic-Signal-Data-Improvement.
+"""Vocabulary-only WOMD trajectory reconstruction for CatK.
 
-The reconstruction project is deliberately loaded as a separate namespace
-package.  Both projects use ``src`` as their top-level Python package, so adding
-the external checkout to ``sys.path`` would otherwise make imports depend on
-which repository happened to be imported first.
+The geometric ``filter`` implementation is bundled with CatK.  The heavier
+``batch`` and ``optimizer`` implementations can still be loaded from an
+external WOMD-Traffic-Signal-Data-Improvement checkout when explicitly used.
 
 The reconstructed Scenario produced here is a source for trajectory-vocabulary
 clustering only.  CatK model inputs and training labels remain untouched.
@@ -39,7 +38,7 @@ TRAJECTORY_RECONSTRUCTION_METHODS = ("none", "filter", "batch", "optimizer")
 
 @dataclass(frozen=True)
 class TrajectoryReconstructionConfig:
-    """Configuration passed to the external Scenario reconstructor."""
+    """Configuration for bundled filtering or an optional external solver."""
 
     method: str = "none"
     project_root: Optional[str] = None
@@ -56,10 +55,10 @@ class TrajectoryReconstructionConfig:
                 f"Unknown trajectory reconstruction method '{self.method}'. "
                 f"Choose one of: {valid}"
             )
-        if self.method != "none" and not self.project_root:
+        if self.method in ("batch", "optimizer") and not self.project_root:
             raise ValueError(
-                "--trajectory_reconstruction_root is required when trajectory "
-                "reconstruction is enabled"
+                "--reconstruction-root is required for batch and optimizer "
+                "trajectory reconstruction"
             )
         if self.method != "none" and self.project_root:
             entrypoint = (
@@ -137,6 +136,20 @@ def reconstruct_scenario_agents(
 
     if not config.is_active:
         return scenario, None
+
+    if config.method == "filter" and not config.project_root:
+        from .trajectory_filter_reconstructor import (
+            config_for_filter_strength,
+            reconstruct_scenario_agents as reconstruct_with_filter,
+        )
+
+        return reconstruct_with_filter(
+            scenario,
+            config=config_for_filter_strength(
+                config.filter_strength,
+                max_gap_frames=config.max_gap_frames,
+            ),
+        )
 
     entrypoint = _load_reconstruction_entrypoint(config.project_root or "")
     return entrypoint(

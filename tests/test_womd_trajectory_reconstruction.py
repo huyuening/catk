@@ -2,6 +2,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.smart.tokens.womd_trajectory_reconstruction import (
     TrajectoryReconstructionConfig,
@@ -21,9 +22,25 @@ class WomdTrajectoryReconstructionTest(unittest.TestCase):
         self.assertIs(reconstructed, scenario)
         self.assertIsNone(stats)
 
-    def test_active_reconstruction_requires_project_root(self):
-        with self.assertRaisesRegex(ValueError, "reconstruction_root"):
-            TrajectoryReconstructionConfig(method="filter")
+    def test_advanced_reconstruction_requires_project_root(self):
+        with self.assertRaisesRegex(ValueError, "reconstruction-root"):
+            TrajectoryReconstructionConfig(method="batch")
+
+    def test_bundled_filter_does_not_require_project_root(self):
+        config = TrajectoryReconstructionConfig(method="filter")
+
+        self.assertTrue(config.is_active)
+        self.assertIsNone(config.project_root)
+
+    def test_bundled_filter_reconstructs_without_external_checkout(self):
+        scenario = SimpleNamespace(timestamps_seconds=[], tracks=[])
+
+        reconstructed, stats = reconstruct_scenario_agents(
+            scenario, TrajectoryReconstructionConfig(method="filter")
+        )
+
+        self.assertIsNot(reconstructed, scenario)
+        self.assertEqual(stats.total_tracks, 0)
 
     def test_external_project_is_loaded_in_an_isolated_namespace(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

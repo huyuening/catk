@@ -71,42 +71,48 @@ model-feature change is that `length/width/height` comes from the last history
 frame (`current_time_index`) rather than an average that can include future
 frames.
 
-Trajectory reconstruction is isolated to offline vocabulary construction. A
-copy of the training trajectories is reconstructed over all 91 available frames
-with `WOMD-Traffic-Signal-Data-Improvement`, then split into the same 0.5 s local
-segments consumed by CatK's K-disk clustering. Because this copy is never used
-as per-scenario history input or as a future target, the history/future boundary
-does not need a causal two-pass reconstruction. Never substitute the
-reconstructed vocabulary-source caches for the normal CatK training,
-validation, or testing caches.
+Trajectory reconstruction is isolated to offline vocabulary construction. The
+bundled geometric filter reconstructs each training trajectory over all 91
+available frames, then splits it into the same 0.5 s local segments consumed by
+CatK's K-disk clustering. Because this copy is never used as per-scenario
+history input or as a future target, the history/future boundary does not need a
+causal two-pass reconstruction. Never substitute the reconstructed
+vocabulary-source caches for the normal CatK training, validation, or testing
+caches. The bundled filter is distributed under the PolyForm Noncommercial
+License 1.0.0 in `src/smart/tokens`.
 
 ### Compare raw and reconstructed trajectory vocabularies
 
 `src/smart/tokens/compare_trajectory_token_reconstruction.py` runs a matched
-experiment on a real WOMD TFRecord shard. It writes agent-only CatK caches for
-the legacy and reconstructed branches, extracts the same 0.5 s local trajectory
-segments used by `traj_clustering.py`, learns K-disk vocabularies, and exports
-matched-scale plots plus smoothness and quantization metrics. Maps are omitted
-from these comparison caches because they are unchanged and are not consumed by
-agent-token clustering.
+experiment on one WOMD TFRecord shard or a directory of training shards. It
+writes agent-only CatK caches for the legacy and reconstructed branches,
+extracts the same 0.5 s local trajectory segments used by
+`traj_clustering.py`, learns K-disk vocabularies, and exports matched-scale plots
+plus smoothness and quantization metrics. Maps are omitted from these comparison
+caches because they are unchanged and are not consumed by agent-token
+clustering.
 
 ```bash
-conda run -n womd_tls python -m \
-  src.smart.tokens.compare_trajectory_token_reconstruction \
-  --input-tfrecord /path/to/training.tfrecord-00000-of-01000 \
-  --reconstruction-root /path/to/WOMD-Traffic-Signal-Data-Improvement \
+python -m src.smart.tokens.compare_trajectory_token_reconstruction \
+  --input-path /path/to/preprocessed_scenario/training \
   --output-dir outputs/trajectory_token_reconstruction_comparison \
+  --vocab-output-dir src/smart/tokens \
+  --vocab-output-name agent_vocab_reconstructed.pkl \
   --method filter \
   --filter-strength strong \
-  --num-clusters 2048
+  --num-clusters 2048 \
+  --num-workers 12 \
+  --worker-backend process
 ```
 
-The analysis vocabularies retain the maximum supported token count per class.
-The additional `*_agent_vocab.pkl` files trim every class to the same count and
-can be loaded by CatK's existing `TokenProcessor`. Add
+The final CatK-compatible vocabulary is written directly to
+`src/smart/tokens/agent_vocab_reconstructed.pkl`. Analysis vocabularies retain
+the maximum supported token count per class, while `*_agent_vocab.pkl` files
+trim every class to the same count for the existing `TokenProcessor`. Add
 `--write-reconstructed-tfrecord` only when a serialized audit copy is useful;
 that TFRecord is also vocabulary-only and must not be used as model inputs or
-labels.
+labels. `--reconstruction-root` is optional and only needed for the external
+`batch` or `optimizer` methods.
 
 ## Run the code
 In the scripts, we provide
