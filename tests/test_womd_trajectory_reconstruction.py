@@ -3,7 +3,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from src.womd_trajectory_reconstruction import (
+from src.smart.tokens.womd_trajectory_reconstruction import (
     TrajectoryReconstructionConfig,
     reconstruct_scenario_agents,
     reconstruct_scenario_for_vocabulary,

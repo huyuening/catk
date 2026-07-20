@@ -82,16 +82,17 @@ validation, or testing caches.
 
 ### Compare raw and reconstructed trajectory vocabularies
 
-`tools/compare_trajectory_token_reconstruction.py` runs a matched experiment on
-a real WOMD TFRecord shard. It writes agent-only CatK caches for the legacy and
-reconstructed branches, extracts the same 0.5 s local trajectory segments used
-by `traj_clustering.py`, learns K-disk vocabularies, and exports matched-scale
-plots plus smoothness and quantization metrics. Maps are omitted from these
-comparison caches because they are unchanged and are not consumed by
+`src/smart/tokens/compare_trajectory_token_reconstruction.py` runs a matched
+experiment on a real WOMD TFRecord shard. It writes agent-only CatK caches for
+the legacy and reconstructed branches, extracts the same 0.5 s local trajectory
+segments used by `traj_clustering.py`, learns K-disk vocabularies, and exports
+matched-scale plots plus smoothness and quantization metrics. Maps are omitted
+from these comparison caches because they are unchanged and are not consumed by
 agent-token clustering.
 
 ```bash
-conda run -n womd_tls python tools/compare_trajectory_token_reconstruction.py \
+conda run -n womd_tls python -m \
+  src.smart.tokens.compare_trajectory_token_reconstruction \
   --input-tfrecord /path/to/training.tfrecord-00000-of-01000 \
   --reconstruction-root /path/to/WOMD-Traffic-Signal-Data-Improvement \
   --output-dir outputs/trajectory_token_reconstruction_comparison \

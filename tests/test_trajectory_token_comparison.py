@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.compare_trajectory_token_reconstruction import (
+from src.smart.tokens.compare_trajectory_token_reconstruction import (
     _canonical_cache_paths,
     _local_segment,
     kdisk_cluster,

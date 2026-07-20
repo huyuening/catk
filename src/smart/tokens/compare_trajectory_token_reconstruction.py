@@ -58,7 +58,7 @@ os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 import numpy as np
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 TYPE_KEYS = ("veh", "ped", "cyc")
 TYPE_LABELS = {"veh": "Vehicle", "ped": "Pedestrian", "cyc": "Cyclist"}
 TYPE_INDEX = {"veh": 0, "ped": 1, "cyc": 2}
@@ -202,7 +202,13 @@ def _load_scenario_class(reconstruction_root: str):
 
 
 def _load_catk_reconstruction_bridge():
-    bridge_path = REPO_ROOT / "src" / "womd_trajectory_reconstruction.py"
+    bridge_path = (
+        REPO_ROOT
+        / "src"
+        / "smart"
+        / "tokens"
+        / "womd_trajectory_reconstruction.py"
+    )
     module_name = "_catk_comparison_reconstruction_bridge"
     module = sys.modules.get(module_name)
     if module is None:
@@ -1365,7 +1371,10 @@ def _write_output_readme(output_dir: Path, args: argparse.Namespace) -> None:
         "## Reproduction",
         "",
         "```bash",
-        "conda run -n womd_tls python tools/compare_trajectory_token_reconstruction.py \\",
+        (
+            "conda run -n womd_tls python -m "
+            "src.smart.tokens.compare_trajectory_token_reconstruction \\"
+        ),
         f"  --input-tfrecord {Path(args.input_tfrecord).expanduser().resolve()} \\",
         f"  --reconstruction-root {Path(args.reconstruction_root).expanduser().resolve()} \\",
         f"  --output-dir {output_dir.resolve()} \\",
