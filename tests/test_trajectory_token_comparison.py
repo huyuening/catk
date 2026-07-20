@@ -1,4 +1,5 @@
 import argparse
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,8 +11,10 @@ from src.smart.tokens.compare_trajectory_token_reconstruction import (
     _local_segment,
     _resolve_input_tfrecords,
     _vocab_export_path,
+    collect_segments,
     kdisk_cluster,
     polygon_contours,
+    validate_cache_pairs,
 )
 
 
@@ -92,6 +95,56 @@ class TrajectoryTokenComparisonTest(unittest.TestCase):
         self.assertEqual(tokens.shape, (2, 6, 3))
         np.testing.assert_allclose(tokens[0, :, 0], 0.005, atol=1e-6)
         np.testing.assert_allclose(tokens[1, :, 0], 1.0, atol=1e-6)
+
+    def test_existing_cache_zero_shape_is_reported_but_still_collected(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            original_dir = root / "original"
+            reconstructed_dir = root / "reconstructed"
+            original_dir.mkdir()
+            reconstructed_dir.mkdir()
+
+            valid_mask = np.ones((2, 91), dtype=bool)
+            position = np.zeros((2, 91, 3), dtype=np.float32)
+            position[0, :, 0] = np.arange(91, dtype=np.float32) * 0.1
+            position[1, :, 0] = np.arange(91, dtype=np.float32) * 0.2
+            base_agent = {
+                "num_nodes": 2,
+                "valid_mask": valid_mask,
+                "role": np.zeros((2, 3), dtype=bool),
+                "id": np.asarray([1, 2], dtype=np.int64),
+                "type": np.asarray([0, 0], dtype=np.uint8),
+                "position": position,
+                "heading": np.zeros((2, 91), dtype=np.float32),
+                "velocity": np.zeros((2, 91, 2), dtype=np.float32),
+                "shape": np.asarray(
+                    [[4.8, 2.0, 1.5], [4.8, 0.0, 1.5]], dtype=np.float32
+                ),
+            }
+            for cache_dir, reconstructed in (
+                (original_dir, False),
+                (reconstructed_dir, True),
+            ):
+                agent = dict(base_agent)
+                agent["trajectory_reconstructed"] = np.full(
+                    2, reconstructed, dtype=bool
+                )
+                cache = {
+                    "scenario_id": "zero-shape",
+                    "current_time_index": 10,
+                    "agent": agent,
+                }
+                with (cache_dir / "zero-shape.pkl").open("wb") as stream:
+                    pickle.dump(cache, stream)
+
+            validation = validate_cache_pairs(original_dir, reconstructed_dir)
+            segments, candidates = collect_segments(original_dir, max_per_class=100)
+
+            self.assertEqual(
+                validation["unresolved_last_history_shape_agent_count"], 1
+            )
+            self.assertEqual(candidates["veh"], 36)
+            self.assertAlmostEqual(float(segments["veh"][:, -1, 0].max()), 1.0)
 
 
 if __name__ == "__main__":

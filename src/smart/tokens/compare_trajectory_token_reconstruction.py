@@ -58,6 +58,8 @@ os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 import numpy as np
 
+from src.agent_preprocessing import get_causal_object_shape
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TYPE_KEYS = ("veh", "ped", "cyc")
@@ -296,6 +298,7 @@ def _agent_cache(
     scenario: Any,
     trajectories_reconstructed: bool,
     selected_object_ids: Sequence[int] | None = None,
+    selected_shapes: np.ndarray | None = None,
 ) -> Dict[str, Any]:
     import torch
 
@@ -324,6 +327,13 @@ def _agent_cache(
             dtype=np.int64,
         )
     num_agents = len(selected)
+    if selected_shapes is not None:
+        selected_shapes = np.asarray(selected_shapes, dtype=np.float32)
+        if selected_shapes.shape != (num_agents, 3):
+            raise ValueError(
+                "selected_shapes must have shape "
+                f"({num_agents}, 3), got {selected_shapes.shape}"
+            )
 
     valid_out = np.zeros((num_agents, num_steps), dtype=bool)
     position_out = np.zeros((num_agents, num_steps, 3), dtype=np.float32)
@@ -335,8 +345,16 @@ def _agent_cache(
         valid = track_infos["valid"][track_index]
         valid_steps = np.flatnonzero(valid)
         states = track_infos["states"][track_index]
-        # Match the updated CatK feature contract: the last history frame.
-        shape_out[output_index] = states[current_index, 3:6]
+        if selected_shapes is None:
+            # Preserve CatK's raw-valid agent set.  Prefer the last history
+            # shape, with a causal non-zero mean fallback for missing parts.
+            shape_out[output_index] = get_causal_object_shape(
+                states, valid, current_index
+            )
+        else:
+            # Reconstruction may change validity inside history.  Dimensions
+            # remain input metadata and must exactly match the original branch.
+            shape_out[output_index] = selected_shapes[output_index]
         if trajectories_reconstructed:
             valid_out[output_index, valid_steps] = True
             position_out[output_index, valid_steps] = states[valid_steps, :3]
@@ -422,6 +440,9 @@ def _process_scenario_task(task: tuple[int, bytes, WorkerConfig]) -> Dict[str, A
         reconstructed,
         trajectories_reconstructed=True,
         selected_object_ids=np.asarray(original_cache["agent"]["id"], dtype=np.int64),
+        selected_shapes=np.asarray(
+            original_cache["agent"]["shape"], dtype=np.float32
+        ),
     )
     _write_pickle(reconstructed_path, reconstructed_cache)
 
@@ -854,6 +875,7 @@ def validate_cache_pairs(
         )
 
     total_agents = 0
+    invalid_shape_agents = 0
     shape_minimum = np.full(3, np.inf, dtype=np.float64)
     shape_maximum = np.full(3, -np.inf, dtype=np.float64)
     for name in sorted(original_paths):
@@ -898,21 +920,32 @@ def validate_cache_pairs(
 
         shape = np.asarray(original_agent["shape"], dtype=np.float64)
         if len(shape):
-            if not np.isfinite(shape).all() or (shape <= 0).any():
-                raise AssertionError(f"Invalid last-history shape in {name}")
-            shape_minimum = np.minimum(shape_minimum, shape.min(axis=0))
-            shape_maximum = np.maximum(shape_maximum, shape.max(axis=0))
+            valid_shape = np.isfinite(shape).all(axis=-1) & (shape > 0).all(axis=-1)
+            invalid_shape_agents += int((~valid_shape).sum())
+            if valid_shape.any():
+                shape_minimum = np.minimum(
+                    shape_minimum, shape[valid_shape].min(axis=0)
+                )
+                shape_maximum = np.maximum(
+                    shape_maximum, shape[valid_shape].max(axis=0)
+                )
         total_agents += int(original_agent["num_nodes"])
 
     return {
         "scenario_count": len(original_paths),
         "agent_count": total_agents,
+        "unresolved_last_history_shape_agent_count": invalid_shape_agents,
         "matching_scenario_ids": True,
         "matching_agent_ids_types_roles_shapes": True,
         "current_frame_agent_set_preserved": True,
         "reconstruction_markers_valid": True,
-        "last_history_shape_min_length_width_height_m": shape_minimum.tolist(),
-        "last_history_shape_max_length_width_height_m": shape_maximum.tolist(),
+        "zero_or_invalid_dimensions_exclude_agents": False,
+        "last_history_shape_min_length_width_height_m": (
+            shape_minimum.tolist() if total_agents > invalid_shape_agents else None
+        ),
+        "last_history_shape_max_length_width_height_m": (
+            shape_maximum.tolist() if total_agents > invalid_shape_agents else None
+        ),
     }
 
 
@@ -1493,7 +1526,8 @@ def _write_output_readme(output_dir: Path, args: argparse.Namespace) -> None:
         "- `*_tokens_comparison.png`: matched-scale trajectory-token plots.",
         "",
         "The caches intentionally omit map tensors because maps are unchanged and are not read by",
-        "`traj_clustering.py`. Shape uses the last history frame in both branches. The reconstructed",
+        "`traj_clustering.py`. Shape uses the last history frame in both branches; zero or invalid",
+        "components fall back to a non-zero mean from history only. The reconstructed",
         "cache is never passed to CatK as history input or future labels.",
         "",
         "## Reproduction",

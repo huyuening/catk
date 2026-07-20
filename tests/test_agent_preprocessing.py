@@ -48,6 +48,40 @@ class AgentPreprocessingTest(unittest.TestCase):
         self.assertTrue(features["valid_mask"][0, 1])
         self.assertNotIn("trajectory_reconstructed", features)
 
+    def test_zero_dimension_uses_nonzero_history_mean_without_excluding_agent(self):
+        track_infos = _track_infos()
+        track_infos["states"][0, 10, 4] = 0.0
+
+        features = get_agent_features(
+            track_infos,
+            split="training",
+            num_historical_steps=11,
+            num_steps=91,
+        )
+
+        self.assertEqual(features["num_nodes"], 1)
+        torch.testing.assert_close(
+            features["shape"][0], torch.tensor([4.8, 1.8, 1.5])
+        )
+
+    def test_shape_fallback_never_uses_future_frames(self):
+        track_infos = _track_infos()
+        track_infos["states"][0, 10, 3:6] = 0.0
+        track_infos["states"][0, 90, 3:6] = np.array(
+            [20.0, 20.0, 20.0], dtype=np.float32
+        )
+
+        features = get_agent_features(
+            track_infos,
+            split="training",
+            num_historical_steps=11,
+            num_steps=91,
+        )
+
+        torch.testing.assert_close(
+            features["shape"][0], torch.tensor([4.0, 1.8, 1.4])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

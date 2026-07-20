@@ -20,6 +20,42 @@ import torch
 from scipy.interpolate import interp1d
 
 
+def get_causal_object_shape(
+    states: np.ndarray, valid: np.ndarray, history_index: int
+) -> np.ndarray:
+    """Return last-history dimensions with causal non-zero mean fallback.
+
+    A finite positive component at the last history frame is kept unchanged.
+    A missing, zero, negative, or non-finite component is replaced by the mean
+    of that component over raw-valid history states with finite positive
+    values.  Future dimensions are never inspected.
+    """
+
+    states = np.asarray(states)
+    valid = np.asarray(valid, dtype=bool)
+    if states.ndim != 2 or states.shape[-1] < 6:
+        raise ValueError("states must have shape [steps, >=6]")
+    if valid.shape != states.shape[:1]:
+        raise ValueError(
+            "states and valid must have the same step dimension: "
+            f"{states.shape[:1]} != {valid.shape}"
+        )
+    if history_index < 0 or history_index >= len(states):
+        raise IndexError(history_index)
+
+    shape = states[history_index, 3:6].astype(np.float32, copy=True)
+    history_dimensions = states[: history_index + 1, 3:6]
+    history_valid = valid[: history_index + 1]
+    for dimension in range(3):
+        if np.isfinite(shape[dimension]) and shape[dimension] > 0:
+            continue
+        values = history_dimensions[:, dimension]
+        usable = history_valid & np.isfinite(values) & (values > 0)
+        if usable.any():
+            shape[dimension] = np.mean(values[usable], dtype=np.float64)
+    return shape
+
+
 def get_agent_features(
     track_infos: Dict[str, np.ndarray],
     split,
@@ -29,8 +65,9 @@ def get_agent_features(
     """Convert decoded Scenario tracks to the unchanged CatK model tensors.
 
     Position, heading, and velocity retain CatK's legacy interpolation.  Only
-    object dimensions change: they come from the last observable history frame
-    instead of an average that can include future frames.
+    object dimensions change: they come from the last observable history frame,
+    with a non-zero history-only mean for missing components, instead of an
+    average that can include future frames.
     """
 
     del split  # Kept in the public signature for existing preprocessing callers.
@@ -63,8 +100,11 @@ def get_agent_features(
         states = track_infos["states"][idx]
 
         # WOSAC fixes box dimensions at the last observable history frame.  The
-        # same causal value is used as the model feature for every data split.
-        object_shape = states[num_historical_steps - 1, 3:6]
+        # same causal value is used for every split; malformed components fall
+        # back only to positive observations from the available history.
+        object_shape = get_causal_object_shape(
+            states, valid, num_historical_steps - 1
+        )
         out_dict["shape"][i] = torch.from_numpy(object_shape)
 
         valid_steps = np.where(valid)[0]
