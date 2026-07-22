@@ -28,7 +28,6 @@ def estimate_history_dynamics(
     num_historical_steps: int = 11,
     token_shift_steps: int = 5,
     dt: float = 0.1,
-    fit_window_steps: int = 6,
     min_speed_mps: Sequence[float] = (0.5, 0.2, 0.3),
     ridge: float = 1.0e-6,
     max_abs_longitudinal_accel_mps2: float = 15.0,
@@ -37,13 +36,13 @@ def estimate_history_dynamics(
 ) -> Tensor:
     """Estimate token-aligned dynamics from observable history.
 
-    Each CatK history token receives ``[a_parallel, omega, a_perp]`` from its
-    own reconstructed 10 Hz interval.  For the standard 11-frame history and
-    five-step token shift this returns ``[n_agent, 2, 3]`` for frames 0--5 and
-    5--10.  A quadratic curve is fitted independently to x/y in each interval;
-    its endpoint derivatives define velocity and acceleration.  The local
-    tangent follows motion rather than object heading, so the same quantities
-    remain meaningful for vehicles, pedestrians, and cyclists.
+    The complete observable history is reconstructed once with one quadratic
+    x/y curve.  Dynamics are then sampled at the endpoints of CatK's history
+    tokens.  For the standard 11-frame history and five-step token shift this
+    returns ``[n_agent, 2, 3]`` for frames 0--5 and 5--10.  Both tokens therefore
+    share one continuous reconstruction at frame 5.  The local tangent follows
+    motion rather than object heading, so the same quantities remain meaningful
+    for vehicles, pedestrians, and cyclists.
 
     Only ``position[:, :num_historical_steps]`` is inspected.  At low speed,
     angular and lateral terms are zeroed because the course direction is not
@@ -65,10 +64,10 @@ def estimate_history_dynamics(
             "num_historical_steps must be within the available trajectory: "
             f"{num_historical_steps} not in [1, {position.size(1)}]"
         )
-    if fit_window_steps < 3:
-        raise ValueError("fit_window_steps must be at least 3")
     if token_shift_steps < 1:
         raise ValueError("token_shift_steps must be positive")
+    if num_historical_steps <= token_shift_steps:
+        raise ValueError("history must contain at least one complete token interval")
     if (num_historical_steps - 1) % token_shift_steps != 0:
         raise ValueError(
             "num_historical_steps - 1 must be divisible by token_shift_steps"
@@ -107,41 +106,9 @@ def estimate_history_dynamics(
     if torch.any(limits <= 0):
         raise ValueError("dynamics clipping limits must be positive")
 
-    token_dynamics = []
-    for endpoint in range(
-        token_shift_steps, num_historical_steps, token_shift_steps
-    ):
-        window_steps = min(fit_window_steps, endpoint + 1)
-        start = endpoint + 1 - window_steps
-        token_dynamics.append(
-            _estimate_interval_dynamics(
-                position=position[:, start : endpoint + 1, :2],
-                valid_mask=valid_mask[:, start : endpoint + 1],
-                speed_thresholds=thresholds,
-                dt=dt,
-                ridge=ridge,
-                limits=limits,
-                fit_dtype=fit_dtype,
-            )
-        )
-    return torch.stack(token_dynamics, dim=1).to(output_dtype)
-
-
-def _estimate_interval_dynamics(
-    position: Tensor,
-    valid_mask: Tensor,
-    speed_thresholds: Tensor,
-    *,
-    dt: float,
-    ridge: float,
-    limits: Tensor,
-    fit_dtype: torch.dtype,
-) -> Tensor:
-    """Fit one reconstructed token interval and return endpoint dynamics."""
-
-    n_agent, window_steps = position.shape[:2]
-    pos = position.to(fit_dtype)
-    valid = valid_mask.bool()
+    n_agent = position.size(0)
+    pos = position[:, :num_historical_steps, :2].to(fit_dtype)
+    valid = valid_mask[:, :num_historical_steps].bool()
     finite = torch.isfinite(pos).all(dim=-1)
     valid = valid & finite
     # Global WOMD coordinates can be large compared with sub-metre motion.
@@ -154,8 +121,10 @@ def _estimate_interval_dynamics(
     pos = torch.where(valid.unsqueeze(-1), pos, torch.zeros_like(pos))
 
     times = (
-        torch.arange(window_steps, device=position.device, dtype=fit_dtype)
-        - (window_steps - 1)
+        torch.arange(
+            num_historical_steps, device=position.device, dtype=fit_dtype
+        )
+        - (num_historical_steps - 1)
     ) * dt
     design = torch.stack(
         [torch.ones_like(times), times, 0.5 * times.square()], dim=-1
@@ -168,21 +137,39 @@ def _estimate_interval_dynamics(
     rhs = weighted_design_t @ pos
     regularizer = torch.eye(3, dtype=fit_dtype, device=position.device) * ridge
     coefficients = torch.linalg.solve(normal + regularizer.unsqueeze(0), rhs)
-    velocity = coefficients[:, 1]
-    acceleration = coefficients[:, 2]
+    reconstructed_position = design_batch @ coefficients
 
-    valid_count = valid.sum(dim=-1)
-    endpoint_valid = valid[:, -1]
-    enough_history = (valid_count >= 3) & endpoint_valid
+    endpoint_steps = tuple(
+        range(token_shift_steps, num_historical_steps, token_shift_steps)
+    )
+    endpoint_index = torch.tensor(
+        endpoint_steps, dtype=torch.long, device=position.device
+    )
+    start_index = endpoint_index - token_shift_steps
+    endpoint_time = times[endpoint_index]
+    velocity = coefficients[:, 1].unsqueeze(1) + (
+        coefficients[:, 2].unsqueeze(1) * endpoint_time.view(1, -1, 1)
+    )
+    acceleration = coefficients[:, 2].unsqueeze(1).expand_as(velocity)
+    net_displacement = (
+        reconstructed_position[:, endpoint_index]
+        - reconstructed_position[:, start_index]
+    )
 
-    first_valid_index = valid.to(torch.int64).argmax(dim=-1)
-    batch_index = torch.arange(n_agent, device=position.device)
-    first_position = pos[batch_index, first_valid_index]
-    net_displacement = pos[:, -1] - first_position
+    segment_support = torch.stack(
+        [
+            valid[:, endpoint - token_shift_steps : endpoint + 1].sum(dim=-1)
+            >= 3
+            for endpoint in endpoint_steps
+        ],
+        dim=1,
+    )
+    endpoint_valid = valid[:, endpoint_index]
+    enough_history = segment_support & endpoint_valid
 
     speed = torch.linalg.vector_norm(velocity, dim=-1)
     displacement_norm = torch.linalg.vector_norm(net_displacement, dim=-1)
-    turning_valid = enough_history & (speed >= speed_thresholds)
+    turning_valid = enough_history & (speed >= thresholds.unsqueeze(-1))
 
     # Course tangent for omega/a_perp; a trailing displacement fallback keeps
     # signed a_parallel useful around starts and stops.
@@ -204,8 +191,8 @@ def _estimate_interval_dynamics(
         torch.zeros_like(acceleration_parallel),
     )
     acceleration_perpendicular = (
-        velocity_tangent[:, 0] * acceleration[:, 1]
-        - velocity_tangent[:, 1] * acceleration[:, 0]
+        velocity_tangent[..., 0] * acceleration[..., 1]
+        - velocity_tangent[..., 1] * acceleration[..., 0]
     )
     acceleration_perpendicular = torch.where(
         turning_valid,
@@ -222,4 +209,4 @@ def _estimate_interval_dynamics(
     )
     dynamics = torch.maximum(torch.minimum(dynamics, limits), -limits)
     dynamics = torch.nan_to_num(dynamics)
-    return dynamics
+    return dynamics.to(output_dtype)

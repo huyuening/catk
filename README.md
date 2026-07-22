@@ -121,10 +121,11 @@ artifacts and are never used as model inputs.  A separate optional model branch
 can estimate three motion-frame quantities directly from each scenario's first
 11 observable 10 Hz states: signed longitudinal acceleration, course angular
 speed, and lateral acceleration.  Each of CatK's two history tokens receives
-its own feature triplet: frames 0--5 and frames 5--10 are reconstructed with
-separate quadratic fits before their endpoint derivatives are calculated.  The
-same original CatK caches work for training, validation, and testing without
-future leakage or additional preprocessing.
+its own feature triplet, but the complete frames 0--10 history is reconstructed
+once with one continuous quadratic fit.  Features for frames 0--5 and 5--10
+are sampled from that shared reconstruction, so frame 5 cannot become a segment
+boundary discontinuity.  The same original CatK caches work for training,
+validation, and testing without future leakage or additional preprocessing.
 Positive longitudinal acceleration means speeding up along the motion tangent;
 positive angular speed/lateral acceleration means turning left.  Low-speed
 turning values are zeroed with separate vehicle/pedestrian/cyclist thresholds.

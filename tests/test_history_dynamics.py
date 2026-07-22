@@ -49,7 +49,7 @@ class HistoryDynamicsTest(unittest.TestCase):
         torch.testing.assert_close(outputs[0], outputs[1])
         torch.testing.assert_close(outputs[0], outputs[2])
 
-    def test_two_history_tokens_receive_distinct_interval_dynamics(self):
+    def test_first_token_uses_the_shared_full_history_reconstruction(self):
         time_first = torch.arange(6, dtype=torch.float32) * 0.1
         time_second = torch.arange(6, dtype=torch.float32) * 0.1
         position_xy = torch.zeros(11, 2)
@@ -63,10 +63,9 @@ class HistoryDynamicsTest(unittest.TestCase):
 
         dynamics = estimate_history_dynamics(position, valid, agent_type)
 
-        self.assertLess(abs(float(dynamics[0, 0, 0])), 2e-2)
-        torch.testing.assert_close(
-            dynamics[0, 1, 0], torch.tensor(2.0), atol=2e-2, rtol=0
-        )
+        # A separately fitted first interval would remain at zero acceleration.
+        # The non-zero value proves both token features use the one 11-frame fit.
+        self.assertGreater(abs(float(dynamics[0, 0, 0])), 0.1)
 
     def test_curved_motion_has_consistent_omega_and_lateral_acceleration(self):
         time = torch.arange(11, dtype=torch.float32) * 0.1
@@ -82,7 +81,6 @@ class HistoryDynamicsTest(unittest.TestCase):
             position,
             valid,
             agent_type,
-            fit_window_steps=6,
             min_speed_mps=(0.1, 0.1, 0.1),
         )
 

@@ -184,7 +184,6 @@ class TokenProcessor(torch.nn.Module):
                 num_historical_steps=int(config.get("num_historical_steps", 11)),
                 token_shift_steps=self.shift,
                 dt=float(config.get("dt", 0.1)),
-                fit_window_steps=int(config.get("fit_window_steps", 6)),
                 min_speed_mps=tuple(
                     config.get("min_speed_mps", [0.5, 0.2, 0.3])
                 ),
