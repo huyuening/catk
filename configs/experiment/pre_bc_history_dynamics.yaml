@@ -1,6 +1,6 @@
 # @package _global_
 
-# Original CatK pre-BC with one optional, causal history-dynamics branch.
+# CatK pre-BC with cached, reconstructed history dynamics.
 defaults:
   - pre_bc
   - _self_

@@ -15,18 +15,11 @@ model_config:
   wosac_metrics_version: "2024"
   trajtok_root: ${oc.env:TRAJTOK_ROOT,/root/workspace/TrajTok}
   fast_wosac_gt_dir: null
-  # Optional causal dynamics context derived online from the 10 Hz observed
-  # history. Disabled by default to preserve the original CatK architecture.
+  # Optional causal dynamics context reconstructed from raw 10 Hz history
+  # during cache generation. Disabled by default for the original CatK model.
   history_dynamics:
     is_active: false
-    num_historical_steps: 11
-    dt: 0.1
-    # vehicle, pedestrian, cyclist course-speed thresholds.
-    min_speed_mps: [0.5, 0.2, 0.3]
-    ridge: 1.0e-6
-    max_abs_longitudinal_accel_mps2: 15.0
-    max_abs_angular_speed_radps: 3.0
-    max_abs_lateral_accel_mps2: 15.0
+    # [signed longitudinal acceleration, angular speed, lateral acceleration]
     normalization_scale: [5.0, 1.0, 5.0]
     initial_gate: 1.0
   token_processor:

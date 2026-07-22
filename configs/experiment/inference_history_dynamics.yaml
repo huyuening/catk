@@ -1,6 +1,6 @@
 # @package _global_
 
-# Fast WOSAC 2025 validation for a checkpoint trained with history dynamics.
+# Fast WOSAC 2025 validation for a checkpoint trained with cached history dynamics.
 defaults:
   - inference
   - _self_

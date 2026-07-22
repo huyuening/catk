@@ -28,8 +28,6 @@ from src.smart.utils import (
     wrap_angle,
 )
 
-from .history_dynamics import estimate_history_dynamics
-
 
 class TokenProcessor(torch.nn.Module):
 
@@ -176,28 +174,21 @@ class TokenProcessor(torch.nn.Module):
             "gt_valid_raw": valid[:, self.shift :: self.shift],  # [n_agent, n_step=18]
         }
         if self.history_dynamics_active:
-            config = self.history_dynamics_config
-            tokenized_agent["history_dynamics"] = estimate_history_dynamics(
-                position=pos,
-                valid_mask=valid,
-                agent_type=data["agent"]["type"],
-                num_historical_steps=int(config.get("num_historical_steps", 11)),
-                token_shift_steps=self.shift,
-                dt=float(config.get("dt", 0.1)),
-                min_speed_mps=tuple(
-                    config.get("min_speed_mps", [0.5, 0.2, 0.3])
-                ),
-                ridge=float(config.get("ridge", 1.0e-6)),
-                max_abs_longitudinal_accel_mps2=float(
-                    config.get("max_abs_longitudinal_accel_mps2", 15.0)
-                ),
-                max_abs_angular_speed_radps=float(
-                    config.get("max_abs_angular_speed_radps", 3.0)
-                ),
-                max_abs_lateral_accel_mps2=float(
-                    config.get("max_abs_lateral_accel_mps2", 15.0)
-                ),
-            )
+            required = ("history_dynamics", "history_dynamics_valid")
+            missing = [key for key in required if key not in data["agent"]]
+            if missing:
+                raise KeyError(
+                    "history_dynamics is active but the CatK cache is missing "
+                    f"{missing}. Regenerate every split with "
+                    "src.data_preprocess "
+                    "--history_dynamics_filter_strength strong."
+                )
+            tokenized_agent["history_dynamics"] = data["agent"][
+                "history_dynamics"
+            ].to(dtype=pos.dtype)
+            tokenized_agent["history_dynamics_valid"] = data["agent"][
+                "history_dynamics_valid"
+            ].bool()
         # [n_token, 8]
         for k in ["veh", "ped", "cyc"]:
             tokenized_agent[f"trajectory_token_{k}"] = getattr(

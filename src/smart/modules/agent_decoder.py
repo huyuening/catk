@@ -193,6 +193,7 @@ class SMARTAgentDecoder(nn.Module):
         agent_type,  # [n_agent]
         agent_shape,  # [n_agent, 3]
         history_dynamics=None,  # [n_agent, n_history_token, 3]
+        history_dynamics_valid=None,  # [n_agent, n_history_token]
         inference=False,
     ):
         n_agent, n_step, traj_dim = pos_a.shape
@@ -250,6 +251,11 @@ class SMARTAgentDecoder(nn.Module):
                     "history_dynamics is active but tokenized agent data does not "
                     "contain history_dynamics"
                 )
+            if history_dynamics_valid is None:
+                raise KeyError(
+                    "history_dynamics is active but tokenized agent data does not "
+                    "contain history_dynamics_valid"
+                )
             normalized_dynamics = history_dynamics / self.history_dynamics_scale.to(
                 dtype=history_dynamics.dtype
             )
@@ -257,9 +263,16 @@ class SMARTAgentDecoder(nn.Module):
                 raise ValueError(
                     "history_dynamics must have shape [n_agent, n_history_token, 3]"
                 )
+            if history_dynamics_valid.shape != normalized_dynamics.shape[:2]:
+                raise ValueError(
+                    "history_dynamics_valid must match history_dynamics[:2]"
+                )
             history_dynamics_emb = self.history_dynamics_emb(
                 normalized_dynamics.flatten(0, 1)
             ).view(n_agent, normalized_dynamics.size(1), self.hidden_dim)
+            history_dynamics_emb = history_dynamics_emb * (
+                history_dynamics_valid.unsqueeze(-1).to(history_dynamics_emb.dtype)
+            )
             if history_dynamics_emb.size(1) < n_step:
                 dynamics_padding = history_dynamics_emb.new_zeros(
                     n_agent,
@@ -436,6 +449,7 @@ class SMARTAgentDecoder(nn.Module):
             agent_type=tokenized_agent["type"],  # [n_agent]
             agent_shape=tokenized_agent["shape"],  # [n_agent, 3]
             history_dynamics=tokenized_agent.get("history_dynamics"),
+            history_dynamics_valid=tokenized_agent.get("history_dynamics_valid"),
         )  # feat_a: [n_agent, n_step, hidden_dim]
 
         # ! build temporal, interaction and map2agent edges
@@ -554,6 +568,7 @@ class SMARTAgentDecoder(nn.Module):
             agent_type=tokenized_agent["type"],
             agent_shape=tokenized_agent["shape"],
             history_dynamics=tokenized_agent.get("history_dynamics"),
+            history_dynamics_valid=tokenized_agent.get("history_dynamics_valid"),
             inference=True,
         )
 

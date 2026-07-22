@@ -169,6 +169,16 @@ class TrackFilterResult:
 
 
 @dataclass
+class ArrayTrajectoryReconstruction:
+    """Reconstructed array trajectory and the support accepted by the filter."""
+
+    positions: np.ndarray
+    heading: np.ndarray
+    valid: np.ndarray
+    result: TrackFilterResult
+
+
+@dataclass
 class ReconstructionStats:
     total_tracks: int = 0
     reconstructed_tracks: int = 0
@@ -2018,60 +2028,86 @@ def _interpolated_sizes(track, start: int, end: int, observed: np.ndarray) -> np
     return sizes
 
 
-def reconstruct_track(
-    track,
+def reconstruct_trajectory_arrays(
+    positions: np.ndarray,
+    heading: np.ndarray,
+    valid: np.ndarray,
     timestamps: Iterable[float],
+    object_type: int,
     config: TrajectoryFilterConfig | None = None,
-) -> TrackFilterResult:
+) -> ArrayTrajectoryReconstruction:
+    """Apply the proto reconstructor to one array-backed trajectory.
+
+    ``object_type`` uses WOMD's one-based convention: vehicle=1,
+    pedestrian=2, cyclist=3. Invalid samples are never used as observations.
+    With ``max_gap_frames=None`` all internal gaps between the first and last
+    observations belong to one continuous reconstruction block.
+    """
+
     config = config or TrajectoryFilterConfig()
-    result = TrackFilterResult()
-    if int(track.object_type) not in config.processed_object_types:
-        return result
+    positions = np.asarray(positions, dtype=float)
+    heading = np.asarray(heading, dtype=float)
+    valid = np.asarray(valid, dtype=bool)
+    if positions.ndim != 2 or positions.shape[1] < 2:
+        raise ValueError("positions must have shape [steps, >=2]")
+    if heading.shape != positions.shape[:1] or valid.shape != positions.shape[:1]:
+        raise ValueError("positions, heading, and valid must share the step dimension")
 
-    timestamps = list(timestamps)
-    count = min(len(track.states), len(timestamps))
-    if count < config.min_observed_frames:
-        result.insufficient_support = True
-        return result
+    count = len(valid)
     time = _timestamps_for_count(timestamps, count)
-    original_valid = np.array([track.states[i].valid for i in range(count)], dtype=bool)
-    if int(np.sum(original_valid)) < config.min_observed_frames:
+    if positions.shape[1] == 2:
+        positions_xyz = np.column_stack(
+            (positions, np.zeros(count, dtype=positions.dtype))
+        )
+    else:
+        positions_xyz = positions[:, :3].copy()
+
+    output_positions = positions_xyz.copy()
+    output_heading = heading.copy()
+    output_valid = np.zeros(count, dtype=bool)
+    result = TrackFilterResult()
+    if object_type not in config.processed_object_types:
+        return ArrayTrajectoryReconstruction(
+            output_positions, output_heading, output_valid, result
+        )
+    if (
+        count < config.min_observed_frames
+        or int(np.sum(valid)) < config.min_observed_frames
+    ):
         result.insufficient_support = True
-        return result
+        return ArrayTrajectoryReconstruction(
+            output_positions, output_heading, output_valid, result
+        )
 
-    eligible, gap_candidates = _fill_short_internal_gaps(original_valid, config.max_gap_frames)
+    eligible, gap_candidates = _fill_short_internal_gaps(
+        valid, config.max_gap_frames
+    )
     accepted_runs: list[tuple[int, int]] = []
-
     for start, end in _true_runs(eligible):
-        observed = original_valid[start:end]
+        observed = valid[start:end]
         if int(np.sum(observed)) < config.min_observed_frames:
             continue
-        states = track.states[start:end]
-        x = np.array([state.center_x for state in states], dtype=float)
-        y = np.array([state.center_y for state in states], dtype=float)
-        z = np.array([state.center_z for state in states], dtype=float)
-        heading = np.array([state.heading for state in states], dtype=float)
         candidate = _filter_segment(
-            x,
-            y,
-            z,
-            heading,
+            output_positions[start:end, 0],
+            output_positions[start:end, 1],
+            output_positions[start:end, 2],
+            output_heading[start:end],
             observed,
             time[start:end],
-            int(track.object_type),
+            object_type,
             config,
         )
         used_fallback = False
         if candidate is None:
             result.rejected_segments += 1
             candidate = _best_effort_candidate(
-                x,
-                y,
-                z,
-                heading,
+                output_positions[start:end, 0],
+                output_positions[start:end, 1],
+                output_positions[start:end, 2],
+                output_heading[start:end],
                 observed,
                 time[start:end],
-                int(track.object_type),
+                object_type,
                 config,
             )
             if candidate is None:
@@ -2079,25 +2115,15 @@ def reconstruct_track(
             used_fallback = True
             result.best_effort_segments += 1
 
-        sizes = _interpolated_sizes(track, start, end, observed)
-        for local_index, global_index in enumerate(range(start, end)):
-            state = track.states[global_index]
-            state.center_x = float(candidate.x[local_index])
-            state.center_y = float(candidate.y[local_index])
-            state.center_z = float(candidate.z[local_index])
-            state.heading = float(candidate.heading[local_index])
-            if not original_valid[global_index]:
-                state.length = float(sizes[local_index, 0])
-                state.width = float(sizes[local_index, 1])
-                state.height = float(sizes[local_index, 2])
-            state.valid = True
+        output_positions[start:end] = np.column_stack(
+            (candidate.x, candidate.y, candidate.z)
+        )
+        output_heading[start:end] = candidate.heading
+        output_valid[start:end] = True
+        accepted_runs.append((start, end))
 
         velocity_x = _gradient(candidate.x, time[start:end])
         velocity_y = _gradient(candidate.y, time[start:end])
-        for local_index, global_index in enumerate(range(start, end)):
-            track.states[global_index].velocity_x = float(velocity_x[local_index])
-            track.states[global_index].velocity_y = float(velocity_y[local_index])
-
         modes, _, _ = classify_motion_modes(
             velocity_x,
             velocity_y,
@@ -2105,7 +2131,6 @@ def reconstruct_track(
             np.ones(end - start, dtype=bool),
             config,
         )
-        accepted_runs.append((start, end))
         filled_count = int(np.sum(gap_candidates[start:end]))
         result.filtered_frames += end - start
         result.filled_frames += filled_count
@@ -2123,7 +2148,68 @@ def reconstruct_track(
         result.reverse_frames += int(np.sum(modes == int(MotionMode.REVERSE)))
 
     result.reconstructed = bool(accepted_runs)
-    return result
+    return ArrayTrajectoryReconstruction(
+        output_positions, output_heading, output_valid, result
+    )
+
+
+def reconstruct_track(
+    track,
+    timestamps: Iterable[float],
+    config: TrajectoryFilterConfig | None = None,
+) -> TrackFilterResult:
+    config = config or TrajectoryFilterConfig()
+    result = TrackFilterResult()
+    if int(track.object_type) not in config.processed_object_types:
+        return result
+
+    timestamps = list(timestamps)
+    count = min(len(track.states), len(timestamps))
+    if count < config.min_observed_frames:
+        result.insufficient_support = True
+        return result
+    original_valid = np.array([track.states[i].valid for i in range(count)], dtype=bool)
+    positions = np.array(
+        [
+            [state.center_x, state.center_y, state.center_z]
+            for state in track.states[:count]
+        ],
+        dtype=float,
+    )
+    heading = np.array(
+        [state.heading for state in track.states[:count]], dtype=float
+    )
+    reconstruction = reconstruct_trajectory_arrays(
+        positions,
+        heading,
+        original_valid,
+        timestamps,
+        int(track.object_type),
+        config,
+    )
+    time = _timestamps_for_count(timestamps, count)
+
+    for start, end in _true_runs(reconstruction.valid):
+        observed = original_valid[start:end]
+        sizes = _interpolated_sizes(track, start, end, observed)
+        for local_index, global_index in enumerate(range(start, end)):
+            state = track.states[global_index]
+            state.center_x = float(reconstruction.positions[global_index, 0])
+            state.center_y = float(reconstruction.positions[global_index, 1])
+            state.center_z = float(reconstruction.positions[global_index, 2])
+            state.heading = float(reconstruction.heading[global_index])
+            if not original_valid[global_index]:
+                state.length = float(sizes[local_index, 0])
+                state.width = float(sizes[local_index, 1])
+                state.height = float(sizes[local_index, 2])
+            state.valid = True
+
+        velocity_x = _gradient(reconstruction.positions[start:end, 0], time[start:end])
+        velocity_y = _gradient(reconstruction.positions[start:end, 1], time[start:end])
+        for local_index, global_index in enumerate(range(start, end)):
+            track.states[global_index].velocity_x = float(velocity_x[local_index])
+            track.states[global_index].velocity_y = float(velocity_y[local_index])
+    return reconstruction.result
 
 
 def reconstruct_scenario_agents(

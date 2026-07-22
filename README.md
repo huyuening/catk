@@ -118,17 +118,33 @@ labels. `--reconstruction-root` is optional and only needed for the external
 
 The reconstructed vocabulary sources above remain training-only, offline
 artifacts and are never used as model inputs.  A separate optional model branch
-can estimate three motion-frame quantities directly from each scenario's first
-11 observable 10 Hz states: signed longitudinal acceleration, course angular
-speed, and lateral acceleration.  Each of CatK's two history tokens receives
-its own feature triplet, but the complete frames 0--10 history is reconstructed
-once with one continuous quadratic fit.  Features for frames 0--5 and 5--10
-are sampled from that shared reconstruction, so frame 5 cannot become a segment
-boundary discontinuity.  The same original CatK caches work for training,
-validation, and testing without future leakage or additional preprocessing.
-Positive longitudinal acceleration means speeding up along the motion tangent;
-positive angular speed/lateral acceleration means turning left.  Low-speed
-turning values are zeroed with separate vehicle/pedestrian/cyclist thresholds.
+adds three body-frame quantities derived from reconstructed xy/theta: signed
+longitudinal acceleration, angular speed, and signed lateral acceleration.
+During preprocessing, the complete raw frames 0--10 history is passed once
+through the same missing-value, trajectory, and reverse-aware heading filter
+used by the reconstructed vocabulary.  The two CatK history tokens receive the
+values at frames 5 and 10 respectively.  No frame after the observable history
+is read.  A token feature is masked when its six-frame interval contains fewer
+than three raw observations.
+
+Generate caches containing these optional fields for every split before using
+a history-dynamics experiment:
+
+```bash
+for SPLIT in training validation testing; do
+  python -m src.data_preprocess \
+    --split "$SPLIT" \
+    --num_workers 12 \
+    --input_dir /path/to/womd/uncompressed/scenario \
+    --output_dir /path/to/catk_cache \
+    --history_dynamics_filter_strength strong
+done
+```
+
+Omitting `--history_dynamics_filter_strength` produces unchanged CatK caches.
+Existing caches can therefore still run the original experiments, but they
+must be regenerated before enabling the dynamics branch because CatK's legacy
+interpolation has already discarded the original gap mask.
 
 The original CatK architecture remains the default.  Enable the dynamics
 ablation with the dedicated experiment:

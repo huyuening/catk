@@ -82,6 +82,32 @@ class AgentPreprocessingTest(unittest.TestCase):
             features["shape"][0], torch.tensor([4.0, 1.8, 1.4])
         )
 
+    def test_optional_history_dynamics_are_reconstructed_before_interpolation(self):
+        track_infos = _track_infos()
+        time = np.arange(91, dtype=np.float32) * 0.1
+        track_infos["states"][0, :, 0] = 3.0 * time + time**2
+        track_infos["valid"][0, :11] = True
+
+        features = get_agent_features(
+            track_infos,
+            split="training",
+            num_historical_steps=11,
+            num_steps=91,
+            timestamps=time,
+            history_dynamics_filter_strength="strong",
+        )
+
+        self.assertEqual(features["history_dynamics"].shape, (1, 2, 3))
+        torch.testing.assert_close(
+            features["history_dynamics"][0, :, 0],
+            torch.tensor([2.0, 2.0]),
+            atol=2e-2,
+            rtol=0,
+        )
+        torch.testing.assert_close(
+            features["history_dynamics_valid"], torch.ones(1, 2, dtype=torch.bool)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

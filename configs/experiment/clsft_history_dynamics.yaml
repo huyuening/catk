@@ -1,6 +1,6 @@
 # @package _global_
 
-# CAT-32 fine-tuning for a checkpoint trained with the dynamics branch.
+# CAT-32 fine-tuning for a checkpoint trained with cached history dynamics.
 defaults:
   - clsft
   - _self_

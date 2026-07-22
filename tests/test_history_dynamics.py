@@ -1,139 +1,155 @@
 import unittest
 
-import torch
+import numpy as np
 
-from src.smart.tokens.history_dynamics import estimate_history_dynamics
+from src.smart.tokens.history_dynamics import extract_history_dynamics
 
 
 class HistoryDynamicsTest(unittest.TestCase):
-    def _trajectory(self, position_xy, agent_type=0):
-        position = torch.zeros(1, 91, 2, dtype=torch.float32)
-        position[0, : position_xy.size(0)] = position_xy
-        valid = torch.zeros(1, 91, dtype=torch.bool)
-        valid[0, : position_xy.size(0)] = True
-        types = torch.tensor([agent_type], dtype=torch.uint8)
-        return position, valid, types
+    @staticmethod
+    def _trajectory(position_xy):
+        position_xy = np.asarray(position_xy, dtype=np.float64)
+        position = np.zeros((91, 3), dtype=np.float64)
+        position[: len(position_xy), :2] = position_xy
+        heading = np.zeros(91, dtype=np.float64)
+        valid = np.zeros(91, dtype=bool)
+        valid[: len(position_xy)] = True
+        return position, heading, valid
 
-    def test_constant_longitudinal_acceleration(self):
-        time = torch.arange(11, dtype=torch.float32) * 0.1
+    def test_constant_longitudinal_acceleration_is_sampled_for_both_tokens(self):
+        time = np.arange(11, dtype=np.float64) * 0.1
         acceleration = 2.0
-        x = 3.0 * time + 0.5 * acceleration * time.square()
-        position, valid, agent_type = self._trajectory(
-            torch.stack([x, torch.zeros_like(x)], dim=-1)
+        x = 3.0 * time + 0.5 * acceleration * time**2
+        position, heading, valid = self._trajectory(
+            np.column_stack((x, np.zeros_like(x)))
         )
 
-        dynamics = estimate_history_dynamics(position, valid, agent_type)
-
-        self.assertEqual(dynamics.shape, (1, 2, 3))
-        torch.testing.assert_close(
-            dynamics[0, :, 0],
-            torch.full((2,), acceleration),
-            atol=2e-2,
-            rtol=0,
-        )
-        torch.testing.assert_close(
-            dynamics[0, :, 1:], torch.zeros(2, 2), atol=2e-2, rtol=0
+        result = extract_history_dynamics(
+            position, heading, valid, agent_type=0, timestamps=time
         )
 
-    def test_motion_frame_definition_is_shared_by_all_agent_types(self):
-        time = torch.arange(11, dtype=torch.float32) * 0.1
-        x = 2.0 * time + 0.5 * time.square()
-        position_xy = torch.stack([x, torch.zeros_like(x)], dim=-1)
-        outputs = []
-        for agent_type_value in range(3):
-            position, valid, agent_type = self._trajectory(
-                position_xy, agent_type=agent_type_value
-            )
-            outputs.append(estimate_history_dynamics(position, valid, agent_type))
+        self.assertEqual(result.values.shape, (2, 3))
+        np.testing.assert_array_equal(result.valid, [True, True])
+        np.testing.assert_allclose(result.values[:, 0], acceleration, atol=2e-2)
+        np.testing.assert_allclose(result.values[:, 1:], 0.0, atol=2e-2)
 
-        torch.testing.assert_close(outputs[0], outputs[1])
-        torch.testing.assert_close(outputs[0], outputs[2])
-
-    def test_first_token_uses_the_shared_full_history_reconstruction(self):
-        time_first = torch.arange(6, dtype=torch.float32) * 0.1
-        time_second = torch.arange(6, dtype=torch.float32) * 0.1
-        position_xy = torch.zeros(11, 2)
-        position_xy[:6, 0] = 2.0 * time_first
-        position_xy[5:, 0] = (
-            position_xy[5, 0]
-            + 2.0 * time_second
-            + 0.5 * 2.0 * time_second.square()
+    def test_reverse_body_heading_keeps_longitudinal_acceleration_signed(self):
+        time = np.arange(11, dtype=np.float64) * 0.1
+        x = 3.0 * time + time**2
+        position, heading, valid = self._trajectory(
+            np.column_stack((x, np.zeros_like(x)))
         )
-        position, valid, agent_type = self._trajectory(position_xy)
+        heading[:11] = np.pi
 
-        dynamics = estimate_history_dynamics(position, valid, agent_type)
+        result = extract_history_dynamics(
+            position, heading, valid, agent_type=0, timestamps=time
+        )
 
-        # A separately fitted first interval would remain at zero acceleration.
-        # The non-zero value proves both token features use the one 11-frame fit.
-        self.assertGreater(abs(float(dynamics[0, 0, 0])), 0.1)
+        np.testing.assert_allclose(result.values[:, 0], -2.0, atol=2e-2)
 
-    def test_curved_motion_has_consistent_omega_and_lateral_acceleration(self):
-        time = torch.arange(11, dtype=torch.float32) * 0.1
+    def test_same_body_frame_definition_supports_every_catk_agent_type(self):
+        time = np.arange(11, dtype=np.float64) * 0.1
+        x = 3.0 * time + time**2
+        position, heading, valid = self._trajectory(
+            np.column_stack((x, np.zeros_like(x)))
+        )
+
+        for agent_type in (0, 1, 2):
+            with self.subTest(agent_type=agent_type):
+                result = extract_history_dynamics(
+                    position,
+                    heading,
+                    valid,
+                    agent_type=agent_type,
+                    timestamps=time,
+                )
+                np.testing.assert_array_equal(result.valid, [True, True])
+                np.testing.assert_allclose(result.values[:, 0], 2.0, atol=2e-2)
+
+    def test_curved_xytheta_produces_angular_and_lateral_motion(self):
+        time = np.arange(11, dtype=np.float64) * 0.1
         radius = 10.0
         angular_speed = 0.4
-        angle = angular_speed * time
-        position_xy = torch.stack(
-            [radius * torch.sin(angle), radius * (1.0 - torch.cos(angle))], dim=-1
-        )
-        position, valid, agent_type = self._trajectory(position_xy)
-
-        dynamics = estimate_history_dynamics(
-            position,
-            valid,
-            agent_type,
-            min_speed_mps=(0.1, 0.1, 0.1),
-        )
-
-        self.assertTrue(torch.all(dynamics[0, :, 1] > 0.0))
-        self.assertTrue(torch.all(dynamics[0, :, 2] > 0.0))
-        torch.testing.assert_close(
-            dynamics[0, :, 2],
-            dynamics[0, :, 1] * (radius * angular_speed),
-            atol=0.15,
-            rtol=0.05,
-        )
-
-    def test_stationary_agents_are_finite_for_all_agent_types(self):
-        position_xy = torch.zeros(11, 2)
-        for agent_type_value in range(3):
-            position, valid, agent_type = self._trajectory(
-                position_xy, agent_type=agent_type_value
+        theta = angular_speed * time
+        position, heading, valid = self._trajectory(
+            np.column_stack(
+                (
+                    radius * np.sin(theta),
+                    radius * (1.0 - np.cos(theta)),
+                )
             )
-            dynamics = estimate_history_dynamics(position, valid, agent_type)
-            self.assertTrue(torch.isfinite(dynamics).all())
-            torch.testing.assert_close(dynamics, torch.zeros_like(dynamics))
-
-    def test_future_positions_cannot_change_history_features(self):
-        time = torch.arange(91, dtype=torch.float32) * 0.1
-        base_position = torch.stack([time, torch.zeros_like(time)], dim=-1)
-        position, valid, agent_type = self._trajectory(base_position)
-        reference = estimate_history_dynamics(position, valid, agent_type)
-
-        position[:, 11:] = torch.randn_like(position[:, 11:]) * 1000.0
-        changed = estimate_history_dynamics(position, valid, agent_type)
-
-        torch.testing.assert_close(changed, reference)
-
-    def test_global_translation_does_not_change_features(self):
-        time = torch.arange(11, dtype=torch.float32) * 0.1
-        position_xy = torch.stack(
-            [2.0 * time + 0.5 * time.square(), 0.25 * time.square()], dim=-1
         )
-        position, valid, agent_type = self._trajectory(position_xy)
-        reference = estimate_history_dynamics(position, valid, agent_type)
+        heading[:11] = theta
 
-        translated = position.clone()
-        translated[:, :11] += torch.tensor([10_000.0, -20_000.0])
-        changed = estimate_history_dynamics(translated, valid, agent_type)
+        result = extract_history_dynamics(
+            position, heading, valid, agent_type=0, timestamps=time
+        )
 
-        torch.testing.assert_close(changed, reference, atol=2e-2, rtol=1e-2)
+        np.testing.assert_allclose(
+            result.values[:, 1], angular_speed, atol=3e-2
+        )
+        np.testing.assert_allclose(
+            result.values[:, 2], radius * angular_speed**2, atol=6e-2
+        )
+
+    def test_internal_gaps_are_filled_in_one_eleven_frame_reconstruction(self):
+        time = np.arange(11, dtype=np.float64) * 0.1
+        x = 2.0 * time + time**2
+        position, heading, valid = self._trajectory(
+            np.column_stack((x, np.zeros_like(x)))
+        )
+        valid[:11] = False
+        valid[[0, 2, 5, 7, 10]] = True
+
+        result = extract_history_dynamics(
+            position, heading, valid, agent_type=0, timestamps=time
+        )
+
+        np.testing.assert_array_equal(result.reconstructed_valid, np.ones(11, bool))
+        np.testing.assert_array_equal(result.valid, [True, True])
+        np.testing.assert_allclose(result.values[:, 0], 2.0, atol=7e-2)
+
+    def test_sparse_token_support_is_masked_instead_of_embedded_as_zero_action(self):
+        time = np.arange(11, dtype=np.float64) * 0.1
+        position, heading, valid = self._trajectory(
+            np.column_stack((time, np.zeros_like(time)))
+        )
+        valid[:11] = False
+        valid[[0, 10]] = True
+
+        result = extract_history_dynamics(
+            position, heading, valid, agent_type=0, timestamps=time
+        )
+
+        np.testing.assert_array_equal(result.valid, [False, False])
+        np.testing.assert_allclose(result.values, 0.0)
+
+    def test_future_positions_and_headings_cannot_change_history_features(self):
+        time = np.arange(91, dtype=np.float64) * 0.1
+        x = time + 0.5 * time**2
+        position, heading, valid = self._trajectory(
+            np.column_stack((x, np.zeros_like(x)))
+        )
+        reference = extract_history_dynamics(
+            position, heading, valid, agent_type=0, timestamps=time
+        )
+
+        position[11:] = np.random.default_rng(7).normal(size=(80, 3)) * 1000.0
+        heading[11:] = np.random.default_rng(8).normal(size=80)
+        changed = extract_history_dynamics(
+            position, heading, valid, agent_type=0, timestamps=time
+        )
+
+        np.testing.assert_allclose(changed.values, reference.values)
+        np.testing.assert_array_equal(changed.valid, reference.valid)
 
     def test_invalid_shapes_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "position"):
-            estimate_history_dynamics(
-                torch.zeros(11, 2),
-                torch.ones(11, dtype=torch.bool),
-                torch.tensor([0]),
+            extract_history_dynamics(
+                np.zeros((11,)),
+                np.zeros(11),
+                np.ones(11, dtype=bool),
+                agent_type=0,
             )
 
 

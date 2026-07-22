@@ -372,7 +372,14 @@ def decode_dynamic_map_states_from_proto(dynamic_map_states):
     return dynamic_map_infos
 
 
-def wm2argo(file_path, split, output_dir, output_dir_tfrecords_splitted):
+def wm2argo(
+    file_path,
+    split,
+    output_dir,
+    output_dir_tfrecords_splitted,
+    history_dynamics_filter_strength=None,
+    history_dynamics_max_gap_frames=None,
+):
     dataset = tf.data.TFRecordDataset(
         file_path, compression_type="", num_parallel_reads=3
     )
@@ -399,6 +406,9 @@ def wm2argo(file_path, split, output_dir, output_dir_tfrecords_splitted):
             split=split,
             num_historical_steps=current_time_index + 1,
             num_steps=91,
+            timestamps=scenario.timestamps_seconds,
+            history_dynamics_filter_strength=history_dynamics_filter_strength,
+            history_dynamics_max_gap_frames=history_dynamics_max_gap_frames,
         )
 
         data["scenario_id"] = scenario_id
@@ -411,7 +421,14 @@ def wm2argo(file_path, split, output_dir, output_dir_tfrecords_splitted):
                 file_writer.write(tf_data)
 
 
-def batch_process9s_transformer(input_dir, output_dir, split, num_workers):
+def batch_process9s_transformer(
+    input_dir,
+    output_dir,
+    split,
+    num_workers,
+    history_dynamics_filter_strength=None,
+    history_dynamics_max_gap_frames=None,
+):
     output_dir = Path(output_dir)
     output_dir_tfrecords_splitted = None
     if split == "validation":
@@ -427,6 +444,8 @@ def batch_process9s_transformer(input_dir, output_dir, split, num_workers):
         split=split,
         output_dir=output_dir,
         output_dir_tfrecords_splitted=output_dir_tfrecords_splitted,
+        history_dynamics_filter_strength=history_dynamics_filter_strength,
+        history_dynamics_max_gap_frames=history_dynamics_max_gap_frames,
     )
 
     with multiprocessing.Pool(num_workers) as p:
@@ -445,8 +464,28 @@ if __name__ == "__main__":
     )
     parser.add_argument("--split", type=str, default="validation")
     parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument(
+        "--history_dynamics_filter_strength",
+        choices=("light", "balanced", "strong"),
+        default=None,
+        help=(
+            "Store reconstructed xy/theta history dynamics in each cache. "
+            "Omit this option to generate unchanged CatK caches."
+        ),
+    )
+    parser.add_argument(
+        "--history_dynamics_max_gap_frames",
+        type=int,
+        default=None,
+        help="Maximum internal history gap to fill; default fills every internal gap.",
+    )
     args = parser.parse_args()
 
     batch_process9s_transformer(
-        args.input_dir, args.output_dir, args.split, num_workers=args.num_workers
+        args.input_dir,
+        args.output_dir,
+        args.split,
+        num_workers=args.num_workers,
+        history_dynamics_filter_strength=args.history_dynamics_filter_strength,
+        history_dynamics_max_gap_frames=args.history_dynamics_max_gap_frames,
     )

@@ -11,13 +11,18 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-"""CatK agent feature extraction with causal object dimensions."""
+"""CatK agent feature extraction with optional reconstructed history dynamics."""
 
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, Optional
 
 import numpy as np
 import torch
 from scipy.interpolate import interp1d
+
+from src.smart.tokens.history_dynamics import extract_history_dynamics
+from src.smart.tokens.trajectory_filter_reconstructor import (
+    config_for_filter_strength,
+)
 
 
 def get_causal_object_shape(
@@ -61,13 +66,18 @@ def get_agent_features(
     split,
     num_historical_steps: int,
     num_steps: int,
+    timestamps: Optional[Iterable[float]] = None,
+    history_dynamics_filter_strength: Optional[str] = None,
+    history_dynamics_max_gap_frames: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Convert decoded Scenario tracks to the unchanged CatK model tensors.
+    """Convert decoded Scenario tracks to CatK model tensors.
 
     Position, heading, and velocity retain CatK's legacy interpolation.  Only
     object dimensions change: they come from the last observable history frame,
     with a non-zero history-only mean for missing components, instead of an
-    average that can include future frames.
+    average that can include future frames. When requested, history dynamics
+    are computed first from raw validity and the original frames, before that
+    legacy interpolation can erase gaps.
     """
 
     del split  # Kept in the public signature for existing preprocessing callers.
@@ -90,6 +100,19 @@ def get_agent_features(
         "velocity": torch.zeros([num_agents, num_steps, 2], dtype=torch.float32),
         "shape": torch.zeros([num_agents, 3], dtype=torch.float32),
     }
+    dynamics_config = None
+    if history_dynamics_filter_strength is not None:
+        dynamics_config = config_for_filter_strength(
+            history_dynamics_filter_strength,
+            max_gap_frames=history_dynamics_max_gap_frames,
+        )
+        num_history_tokens = (num_historical_steps - 1) // 5
+        out_dict["history_dynamics"] = torch.zeros(
+            [num_agents, num_history_tokens, 3], dtype=torch.float32
+        )
+        out_dict["history_dynamics_valid"] = torch.zeros(
+            [num_agents, num_history_tokens], dtype=torch.bool
+        )
 
     for i, idx in enumerate(idx_agents_to_add):
         out_dict["role"][i] = torch.from_numpy(track_infos["role"][idx])
@@ -98,6 +121,21 @@ def get_agent_features(
 
         valid = track_infos["valid"][idx]
         states = track_infos["states"][idx]
+
+        if dynamics_config is not None:
+            dynamics = extract_history_dynamics(
+                position=states[:, :3],
+                heading=states[:, 6],
+                valid_mask=valid,
+                agent_type=int(track_infos["object_type"][idx]),
+                timestamps=timestamps,
+                num_historical_steps=num_historical_steps,
+                filter_config=dynamics_config,
+            )
+            out_dict["history_dynamics"][i] = torch.from_numpy(dynamics.values)
+            out_dict["history_dynamics_valid"][i] = torch.from_numpy(
+                dynamics.valid
+            )
 
         # WOSAC fixes box dimensions at the last observable history frame.  The
         # same causal value is used for every split; malformed components fall
