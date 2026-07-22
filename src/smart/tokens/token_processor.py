@@ -13,7 +13,7 @@
 
 import os
 import pickle
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 from omegaconf import DictConfig
@@ -28,6 +28,8 @@ from src.smart.utils import (
     wrap_angle,
 )
 
+from .history_dynamics import estimate_history_dynamics
+
 
 class TokenProcessor(torch.nn.Module):
 
@@ -37,10 +39,16 @@ class TokenProcessor(torch.nn.Module):
         agent_token_file: str,
         map_token_sampling: DictConfig,
         agent_token_sampling: DictConfig,
+        history_dynamics: Optional[DictConfig] = None,
     ) -> None:
         super(TokenProcessor, self).__init__()
         self.map_token_sampling = map_token_sampling
         self.agent_token_sampling = agent_token_sampling
+        self.history_dynamics_config = history_dynamics
+        self.history_dynamics_active = bool(
+            history_dynamics is not None
+            and history_dynamics.get("is_active", False)
+        )
         self.shift = 5
 
         module_dir = os.path.dirname(__file__)
@@ -167,6 +175,30 @@ class TokenProcessor(torch.nn.Module):
             "gt_head_raw": heading[:, self.shift :: self.shift],  # [n_agent, n_step=18]
             "gt_valid_raw": valid[:, self.shift :: self.shift],  # [n_agent, n_step=18]
         }
+        if self.history_dynamics_active:
+            config = self.history_dynamics_config
+            tokenized_agent["history_dynamics"] = estimate_history_dynamics(
+                position=pos,
+                valid_mask=valid,
+                agent_type=data["agent"]["type"],
+                num_historical_steps=int(config.get("num_historical_steps", 11)),
+                token_shift_steps=self.shift,
+                dt=float(config.get("dt", 0.1)),
+                fit_window_steps=int(config.get("fit_window_steps", 6)),
+                min_speed_mps=tuple(
+                    config.get("min_speed_mps", [0.5, 0.2, 0.3])
+                ),
+                ridge=float(config.get("ridge", 1.0e-6)),
+                max_abs_longitudinal_accel_mps2=float(
+                    config.get("max_abs_longitudinal_accel_mps2", 15.0)
+                ),
+                max_abs_angular_speed_radps=float(
+                    config.get("max_abs_angular_speed_radps", 3.0)
+                ),
+                max_abs_lateral_accel_mps2=float(
+                    config.get("max_abs_lateral_accel_mps2", 15.0)
+                ),
+            )
         # [n_token, 8]
         for k in ["veh", "ped", "cyc"]:
             tokenized_agent[f"trajectory_token_{k}"] = getattr(

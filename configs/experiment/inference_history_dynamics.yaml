@@ -1,0 +1,11 @@
+# @package _global_
+
+# Fast WOSAC 2025 validation for a checkpoint trained with history dynamics.
+defaults:
+  - inference
+  - _self_
+
+model:
+  model_config:
+    history_dynamics:
+      is_active: true

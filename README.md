@@ -114,6 +114,34 @@ that TFRecord is also vocabulary-only and must not be used as model inputs or
 labels. `--reconstruction-root` is optional and only needed for the external
 `batch` or `optimizer` methods.
 
+### Optional causal history dynamics
+
+The reconstructed vocabulary sources above remain training-only, offline
+artifacts and are never used as model inputs.  A separate optional model branch
+can estimate three motion-frame quantities directly from each scenario's first
+11 observable 10 Hz states: signed longitudinal acceleration, course angular
+speed, and lateral acceleration.  Each of CatK's two history tokens receives
+its own feature triplet: frames 0--5 and frames 5--10 are reconstructed with
+separate quadratic fits before their endpoint derivatives are calculated.  The
+same original CatK caches work for training, validation, and testing without
+future leakage or additional preprocessing.
+Positive longitudinal acceleration means speeding up along the motion tangent;
+positive angular speed/lateral acceleration means turning left.  Low-speed
+turning values are zeroed with separate vehicle/pedestrian/cyclist thresholds.
+
+The original CatK architecture remains the default.  Enable the dynamics
+ablation with the dedicated experiment:
+
+```bash
+MY_EXPERIMENT=pre_bc_history_dynamics \
+MY_TASK_NAME=pre_bc_history_dynamics_b200 \
+bash scripts/train.sh
+```
+
+Continue with `experiment=clsft_history_dynamics` and evaluate a compatible
+checkpoint with `experiment=inference_history_dynamics`.  A checkpoint trained
+without this branch should be evaluated with the original experiment config.
+
 ## Run the code
 In the scripts, we provide
 - [scripts/train.sh](scripts/train.sh) for training and fine-tuning.
