@@ -47,6 +47,55 @@ def get_prob_targets(
 
 
 @torch.no_grad()
+def get_prob_targets_spatial_aware_smoothing(
+    target: Tensor,  # [n_agent, n_step, 3] x,y,yaw in local coord
+    token_agent_shape: Tensor,  # [n_agent, 2]
+    token_traj: Tensor,  # [n_agent, n_token, 4, 2]
+    label_smoothing: float,
+) -> Tensor:  # [n_agent, n_step, n_token] prob, last dim sum up to 1
+    if not 0.0 <= label_smoothing < 1.0:
+        raise ValueError(
+            "label_smoothing must satisfy 0 <= label_smoothing < 1, "
+            f"got {label_smoothing}"
+        )
+    if token_traj.shape[1] < 1:
+        raise ValueError("token_traj must contain at least one token")
+
+    contour = cal_polygon_contour(
+        target[..., :2],
+        target[..., 2],
+        token_agent_shape[:, None, :],
+    )
+    distances = torch.norm(
+        contour.unsqueeze(2) - token_traj[:, None, :, :, :],
+        dim=-1,
+    ).mean(-1)
+    target_token_index = distances.argmin(-1)
+    target_mask = one_hot(
+        target_token_index,
+        num_classes=token_traj.shape[1],
+    ).bool()
+    hard_target = target_mask.to(target.dtype)
+
+    if label_smoothing == 0.0 or token_traj.shape[1] == 1:
+        return hard_target
+
+    distances = distances.float()
+    neighbor_weight = (distances + 1e-4).pow(-2)
+    neighbor_weight = neighbor_weight.masked_fill(target_mask, 0.0)
+    neighbor_probability = neighbor_weight / neighbor_weight.sum(
+        dim=-1, keepdim=True
+    ).clamp_min(torch.finfo(neighbor_weight.dtype).tiny)
+
+    prob_target = (neighbor_probability * label_smoothing).to(target.dtype)
+    prob_target = prob_target.masked_fill(
+        target_mask,
+        1.0 - label_smoothing,
+    )
+    return prob_target
+
+
+@torch.no_grad()
 def get_euclidean_targets(
     pred_pos: Tensor,  # [n_agent, 18, 2]
     pred_head: Tensor,  # [n_agent, 18]
