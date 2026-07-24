@@ -18,7 +18,11 @@ from torch import Tensor, tensor
 from torch.nn.functional import cross_entropy
 from torchmetrics.metric import Metric
 
-from .utils import get_euclidean_targets, get_prob_targets
+from .utils import (
+    get_euclidean_targets,
+    get_prob_targets,
+    get_prob_targets_spatial_aware_smoothing,
+)
 
 
 class CrossEntropy(Metric):
@@ -33,12 +37,19 @@ class CrossEntropy(Metric):
         gt_thresh_scale_length: float,  # {"veh": 4.8, "cyc": 2.0, "ped": 1.0}
         label_smoothing: float,
         rollout_as_gt: bool,
+        spatial_aware_smoothing: bool = False,
     ) -> None:
         super().__init__()
+        if not 0.0 <= label_smoothing < 1.0:
+            raise ValueError(
+                "label_smoothing must satisfy 0 <= label_smoothing < 1, "
+                f"got {label_smoothing}"
+            )
         self.use_gt_raw = use_gt_raw
         self.gt_thresh_scale_length = gt_thresh_scale_length
         self.label_smoothing = label_smoothing
         self.rollout_as_gt = rollout_as_gt
+        self.spatial_aware_smoothing = spatial_aware_smoothing
         self.add_state("loss_sum", default=tensor(0.0), dist_reduce_fx="sum")
         self.add_state("count", default=tensor(0.0), dist_reduce_fx="sum")
 
@@ -92,17 +103,27 @@ class CrossEntropy(Metric):
         if self.rollout_as_gt and (next_token_action is not None):
             euclidean_target = next_token_action
 
-        prob_target = get_prob_targets(
-            target=euclidean_target,  # [n_agent, n_step, 3] x,y,yaw in local
-            token_agent_shape=token_agent_shape,  # [n_agent, 2]
-            token_traj=token_traj,  # [n_agent, n_token, 4, 2]
-        )  # [n_agent, n_step, n_token] prob, last dim sum up to 1
+        if self.spatial_aware_smoothing:
+            prob_target = get_prob_targets_spatial_aware_smoothing(
+                target=euclidean_target,  # [n_agent, n_step, 3] x,y,yaw in local
+                token_agent_shape=token_agent_shape,  # [n_agent, 2]
+                token_traj=token_traj,  # [n_agent, n_token, 4, 2]
+                label_smoothing=self.label_smoothing,
+            )
+            builtin_label_smoothing = 0.0
+        else:
+            prob_target = get_prob_targets(
+                target=euclidean_target,  # [n_agent, n_step, 3] x,y,yaw in local
+                token_agent_shape=token_agent_shape,  # [n_agent, 2]
+                token_traj=token_traj,  # [n_agent, n_token, 4, 2]
+            )
+            builtin_label_smoothing = self.label_smoothing
 
         loss = cross_entropy(
             next_token_logits.transpose(1, 2),  # [n_agent, n_token, n_step], logits
             prob_target.transpose(1, 2),  # [n_agent, n_token, n_step], prob
             reduction="none",
-            label_smoothing=self.label_smoothing,
+            label_smoothing=builtin_label_smoothing,
         )  # [n_agent, n_step=16]
 
         # ! weighting final loss [n_agent, n_step]

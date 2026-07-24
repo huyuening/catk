@@ -15,6 +15,8 @@ model:
       agent_token_sampling: # closed-loop
         num_k: 1 # for k nearest neighbors
         temp: 1.0
+    training_loss:
+      spatial_aware_smoothing: true
 
 ckpt_path: null
 # ckpt_path: CKPT_FOR_RESUME.ckpt # to resume training

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import torch
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,31 @@ get_prob_targets = METRIC_UTILS.get_prob_targets
 get_prob_targets_spatial_aware_smoothing = (
     METRIC_UTILS.get_prob_targets_spatial_aware_smoothing
 )
+
+
+def _load_cross_entropy():
+    if importlib.util.find_spec("torchmetrics") is None:
+        return None
+
+    package_name = "catk_test_metrics"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(ROOT / "src/smart/metrics")]
+    sys.modules[package_name] = package
+
+    for module_name in ("utils", "cross_entropy"):
+        qualified_name = f"{package_name}.{module_name}"
+        spec = importlib.util.spec_from_file_location(
+            qualified_name,
+            ROOT / f"src/smart/metrics/{module_name}.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[qualified_name] = module
+        spec.loader.exec_module(module)
+
+    return sys.modules[f"{package_name}.cross_entropy"].CrossEntropy
+
+
+CrossEntropy = _load_cross_entropy()
 
 
 class SpatialAwareTargetTest(unittest.TestCase):
@@ -156,6 +182,141 @@ class SpatialAwareTargetTest(unittest.TestCase):
                         token_traj=token_traj,
                         label_smoothing=value,
                     )
+
+
+@unittest.skipIf(
+    CrossEntropy is None,
+    "torchmetrics is not installed in this Python environment",
+)
+class CrossEntropySelectionTest(unittest.TestCase):
+    @staticmethod
+    def _metric(spatial_aware_smoothing):
+        metric = CrossEntropy(
+            use_gt_raw=True,
+            gt_thresh_scale_length=-1.0,
+            label_smoothing=0.1,
+            rollout_as_gt=False,
+            spatial_aware_smoothing=spatial_aware_smoothing,
+        )
+        metric.eval()
+        return metric
+
+    @staticmethod
+    def _inputs():
+        n_agent, n_step = 1, 16
+        pred_positions = torch.zeros(n_agent, 18, 2)
+        gt_positions = pred_positions.clone()
+        gt_positions[..., 0] = 0.2
+        headings = torch.zeros(n_agent, 18)
+        valid_18 = torch.ones(n_agent, 18, dtype=torch.bool)
+        logits = torch.tensor([2.0, 0.5, -1.0]).view(1, 1, 3)
+        logits = logits.expand(n_agent, n_step, 3).clone()
+        token_agent_shape = SpatialAwareTargetTest._shape()
+        token_traj = SpatialAwareTargetTest._contours([0.0, 1.0, 4.0])
+
+        return {
+            "next_token_logits": logits,
+            "next_token_valid": torch.ones(
+                n_agent,
+                n_step,
+                dtype=torch.bool,
+            ),
+            "pred_pos": pred_positions,
+            "pred_head": headings,
+            "pred_valid": valid_18,
+            "gt_pos_raw": gt_positions,
+            "gt_head_raw": headings,
+            "gt_valid_raw": valid_18,
+            "gt_pos": gt_positions,
+            "gt_head": headings,
+            "gt_valid": valid_18,
+            "token_agent_shape": token_agent_shape,
+            "token_traj": token_traj,
+        }
+
+    @classmethod
+    def _expected_target(cls):
+        return torch.tensor(
+            [[[0.2, 0.0, 0.0]] * 16],
+            dtype=torch.float32,
+        )
+
+    def test_spatial_path_uses_spatial_distribution_without_double_smoothing(
+        self,
+    ):
+        metric = self._metric(spatial_aware_smoothing=True)
+        inputs = self._inputs()
+
+        metric.update(**inputs)
+
+        probability = get_prob_targets_spatial_aware_smoothing(
+            target=self._expected_target(),
+            token_agent_shape=inputs["token_agent_shape"],
+            token_traj=inputs["token_traj"],
+            label_smoothing=0.1,
+        )
+        expected = torch.nn.functional.cross_entropy(
+            inputs["next_token_logits"].transpose(1, 2),
+            probability.transpose(1, 2),
+            reduction="none",
+            label_smoothing=0.0,
+        ).mean()
+        self.assertTrue(torch.allclose(metric.compute(), expected))
+
+    def test_legacy_path_keeps_uniform_builtin_smoothing(self):
+        metric = self._metric(spatial_aware_smoothing=False)
+        inputs = self._inputs()
+
+        metric.update(**inputs)
+
+        probability = get_prob_targets(
+            target=self._expected_target(),
+            token_agent_shape=inputs["token_agent_shape"],
+            token_traj=inputs["token_traj"],
+        )
+        expected = torch.nn.functional.cross_entropy(
+            inputs["next_token_logits"].transpose(1, 2),
+            probability.transpose(1, 2),
+            reduction="none",
+            label_smoothing=0.1,
+        ).mean()
+        self.assertTrue(torch.allclose(metric.compute(), expected))
+
+
+class SpatialAwareConfigTest(unittest.TestCase):
+    @classmethod
+    def _load(cls, relative_path):
+        with (ROOT / relative_path).open(encoding="utf-8") as file:
+            return yaml.safe_load(file)
+
+    def test_pre_bc_enables_spatial_smoothing(self):
+        config = self._load("configs/experiment/pre_bc.yaml")
+        self.assertTrue(
+            config["model"]["model_config"]["training_loss"][
+                "spatial_aware_smoothing"
+            ]
+        )
+
+    def test_history_dynamics_inherits_pre_bc(self):
+        config = self._load(
+            "configs/experiment/pre_bc_history_dynamics.yaml"
+        )
+        self.assertIn("pre_bc", config["defaults"])
+
+    def test_base_and_clsft_keep_spatial_smoothing_disabled(self):
+        base = self._load("configs/model/smart.yaml")
+        clsft = self._load("configs/experiment/clsft.yaml")
+
+        self.assertFalse(
+            base["model_config"]["training_loss"][
+                "spatial_aware_smoothing"
+            ]
+        )
+        self.assertFalse(
+            clsft["model"]["model_config"]["training_loss"][
+                "spatial_aware_smoothing"
+            ]
+        )
 
 
 if __name__ == "__main__":

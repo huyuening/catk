@@ -24,6 +24,7 @@ model:
       gt_thresh_scale_length: -1  # {"veh": 4.8, "cyc": 2.0, "ped": 1.0}
       label_smoothing: 0.0
       rollout_as_gt: false
+      spatial_aware_smoothing: false
     finetune: true
 
 ckpt_path: BC_PRETRAINED_MODEL.ckpt
