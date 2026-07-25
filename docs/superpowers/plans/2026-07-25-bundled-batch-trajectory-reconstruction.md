@@ -63,7 +63,7 @@ Create `tests/test_trajectory_batch_optimizer.py` from the audited regression
 suite at:
 
 ```text
-/Users/huyuening/PycharmProjects/WOMD-Traffic-Signal-Data-Improvement/tests/test_trajectory_batch_optimizer.py
+WOMD-Traffic-Signal-Data-Improvement/tests/test_trajectory_batch_optimizer.py
 SHA-256: ef0a472b0b07db8d93455cfa463ca3bac6af28708c4e137fa12532e08f6547ff
 ```
 
@@ -137,7 +137,7 @@ Expected: collection fails with
 Adapt the audited source:
 
 ```text
-/Users/huyuening/PycharmProjects/WOMD-Traffic-Signal-Data-Improvement/src/trajectory_batch_optimizer.py
+WOMD-Traffic-Signal-Data-Improvement/src/trajectory_batch_optimizer.py
 SHA-256: 63a9d8c26b65b265c6f931749fce9d1b5818f930d6ad1f8527af4e444c007612
 ```
 
