@@ -6,6 +6,7 @@ import yaml
 
 class FutureTokenDynamicsConfigTest(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[1]
+    HYBRID_SOURCE = "raw_tokens_reconstructed_dynamics"
     RAW_EXPERIMENTS = {
         "pre_bc_history_future_token_dynamics": "pre_bc_history_dynamics",
         "clsft_history_future_token_dynamics": "clsft_history_dynamics",
@@ -13,6 +14,9 @@ class FutureTokenDynamicsConfigTest(unittest.TestCase):
     }
     RECONSTRUCTED_EXPERIMENTS = {
         f"{name}_reconstructed": name for name in RAW_EXPERIMENTS
+    }
+    HYBRID_EXPERIMENTS = {
+        f"{name}_hybrid": name for name in RAW_EXPERIMENTS
     }
 
     @classmethod
@@ -74,6 +78,19 @@ class FutureTokenDynamicsConfigTest(unittest.TestCase):
                     "agent_vocab_reconstructed.pkl",
                 )
 
+    def test_hybrid_experiments_keep_original_vocabulary(self):
+        for experiment, parent in self.HYBRID_EXPERIMENTS.items():
+            with self.subTest(experiment=experiment):
+                config = self._load_experiment(experiment)
+
+                self.assertEqual(config["defaults"], [parent, "_self_"])
+                model_config = config["model"]["model_config"]
+                self.assertEqual(
+                    model_config["future_token_dynamics"],
+                    {"source": self.HYBRID_SOURCE},
+                )
+                self.assertNotIn("token_processor", model_config)
+
     def test_all_experiments_compose_with_history_and_matching_provenance(self):
         try:
             import hydra
@@ -84,6 +101,7 @@ class FutureTokenDynamicsConfigTest(unittest.TestCase):
         experiment_names = (
             list(self.RAW_EXPERIMENTS)
             + list(self.RECONSTRUCTED_EXPERIMENTS)
+            + list(self.HYBRID_EXPERIMENTS)
         )
         with hydra.initialize_config_dir(
             config_dir=str(config_dir),
@@ -100,7 +118,15 @@ class FutureTokenDynamicsConfigTest(unittest.TestCase):
                         ],
                     )
                     model_config = config.model.model_config
-                    reconstructed = experiment.endswith("_reconstructed")
+                    if experiment.endswith("_reconstructed"):
+                        expected_source = "reconstructed"
+                        expected_vocabulary = "agent_vocab_reconstructed.pkl"
+                    elif experiment.endswith("_hybrid"):
+                        expected_source = self.HYBRID_SOURCE
+                        expected_vocabulary = "agent_vocab_555_s2.pkl"
+                    else:
+                        expected_source = "raw"
+                        expected_vocabulary = "agent_vocab_555_s2.pkl"
 
                     self.assertTrue(model_config.history_dynamics.is_active)
                     self.assertTrue(
@@ -112,15 +138,11 @@ class FutureTokenDynamicsConfigTest(unittest.TestCase):
                     )
                     self.assertEqual(
                         model_config.future_token_dynamics.source,
-                        "reconstructed" if reconstructed else "raw",
+                        expected_source,
                     )
                     self.assertEqual(
                         model_config.token_processor.agent_token_file,
-                        (
-                            "agent_vocab_reconstructed.pkl"
-                            if reconstructed
-                            else "agent_vocab_555_s2.pkl"
-                        ),
+                        expected_vocabulary,
                     )
 
 

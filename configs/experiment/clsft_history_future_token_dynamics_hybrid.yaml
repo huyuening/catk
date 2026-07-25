@@ -1,0 +1,10 @@
+# @package _global_
+
+defaults:
+  - clsft_history_future_token_dynamics
+  - _self_
+
+model:
+  model_config:
+    future_token_dynamics:
+      source: raw_tokens_reconstructed_dynamics
