@@ -1,6 +1,9 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
+import torch
 
 try:
     from src.smart.tokens.transition_dynamics import (
@@ -10,6 +13,17 @@ try:
 except (ImportError, ModuleNotFoundError):
     TransitionDynamicsAccumulator = None
     extract_full_trajectory_dynamics = None
+
+try:
+    from src.smart.tokens.transition_dynamics_artifact import (
+        load_transition_dynamics_artifact,
+        make_transition_dynamics_artifact,
+        save_transition_dynamics_artifact,
+    )
+except (ImportError, ModuleNotFoundError):
+    load_transition_dynamics_artifact = None
+    make_transition_dynamics_artifact = None
+    save_transition_dynamics_artifact = None
 
 
 class FullTrajectoryDynamicsTest(unittest.TestCase):
@@ -298,6 +312,228 @@ class TransitionDynamicsAccumulatorTest(unittest.TestCase):
                 np.zeros((3, 2, 3)),
                 shrinkage_count=0.0,
             )
+
+
+class TransitionDynamicsArtifactTest(unittest.TestCase):
+    @staticmethod
+    def _artifact(vocabulary):
+        return make_transition_dynamics_artifact(
+            np.zeros((3, 2, 2, 3), dtype=np.float16),
+            vocabulary_path=vocabulary,
+            source="raw",
+            dt=0.1,
+            clipping_limits=(15.0, 3.0, 15.0),
+            shrinkage_count=8.0,
+            statistics={"occurrences": 0},
+        )
+
+    def test_artifact_round_trip_is_bound_to_vocabulary(self):
+        self.assertIsNotNone(
+            make_transition_dynamics_artifact,
+            "transition artifact support is not implemented",
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vocabulary = root / "agent_vocab.pkl"
+            vocabulary.write_bytes(b"vocabulary-a")
+            values = np.arange(36, dtype=np.float16).reshape(3, 2, 2, 3)
+            artifact = make_transition_dynamics_artifact(
+                values,
+                vocabulary_path=vocabulary,
+                source="raw",
+                dt=0.1,
+                clipping_limits=(15.0, 3.0, 15.0),
+                shrinkage_count=8.0,
+                statistics={"occurrences": 12},
+            )
+
+            output = save_transition_dynamics_artifact(
+                root / "lookup.pt",
+                artifact,
+                vocabulary_path=vocabulary,
+            )
+            loaded = load_transition_dynamics_artifact(
+                output,
+                vocabulary_path=vocabulary,
+                expected_source="raw",
+                expected_n_token=2,
+            )
+
+            torch.testing.assert_close(
+                loaded,
+                torch.from_numpy(values),
+                rtol=0.0,
+                atol=0.0,
+            )
+            self.assertEqual(loaded.dtype, torch.float16)
+            self.assertFalse((root / "lookup.pt.tmp").exists())
+
+    def test_load_rejects_missing_numeric_metadata(self):
+        self.assertIsNotNone(make_transition_dynamics_artifact)
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vocabulary = root / "agent_vocab.pkl"
+            vocabulary.write_bytes(b"vocabulary-a")
+            artifact = make_transition_dynamics_artifact(
+                np.zeros((3, 2, 2, 3), dtype=np.float16),
+                vocabulary_path=vocabulary,
+                source="raw",
+                dt=0.1,
+                clipping_limits=(15.0, 3.0, 15.0),
+                shrinkage_count=8.0,
+                statistics={},
+            )
+            del artifact["dt"]
+            output = root / "missing-dt.pt"
+            torch.save(artifact, output)
+
+            with self.assertRaisesRegex(ValueError, "dt"):
+                load_transition_dynamics_artifact(
+                    output,
+                    vocabulary_path=vocabulary,
+                    expected_source="raw",
+                    expected_n_token=2,
+                )
+
+    def test_load_rejects_vocabulary_and_source_mismatch(self):
+        self.assertIsNotNone(load_transition_dynamics_artifact)
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vocabulary = root / "agent_vocab.pkl"
+            vocabulary.write_bytes(b"vocabulary-a")
+            output = root / "lookup.pt"
+            torch.save(self._artifact(vocabulary), output)
+
+            vocabulary.write_bytes(b"vocabulary-b")
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                load_transition_dynamics_artifact(
+                    output,
+                    vocabulary_path=vocabulary,
+                    expected_source="raw",
+                    expected_n_token=2,
+                )
+
+            vocabulary.write_bytes(b"vocabulary-a")
+            with self.assertRaisesRegex(ValueError, "source"):
+                load_transition_dynamics_artifact(
+                    output,
+                    vocabulary_path=vocabulary,
+                    expected_source="reconstructed",
+                    expected_n_token=2,
+                )
+
+    def test_load_rejects_corrupt_structure_and_values(self):
+        self.assertIsNotNone(load_transition_dynamics_artifact)
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vocabulary = root / "agent_vocab.pkl"
+            vocabulary.write_bytes(b"vocabulary-a")
+            corruptions = {
+                "version": ("format_version", 99, "format_version"),
+                "feature": ("feature_order", ("wrong",), "feature_order"),
+                "size": ("vocabulary_size", 3, "vocabulary_size"),
+                "shape": (
+                    "values",
+                    torch.zeros(3, 2, 3, dtype=torch.float16),
+                    "shape",
+                ),
+                "dtype": (
+                    "values",
+                    torch.zeros(3, 2, 2, 3, dtype=torch.float32),
+                    "float16",
+                ),
+                "finite": (
+                    "values",
+                    torch.full(
+                        (3, 2, 2, 3),
+                        float("nan"),
+                        dtype=torch.float16,
+                    ),
+                    "non-finite",
+                ),
+                "limits": ("clipping_limits", (15.0, -1.0, 15.0), "clipping"),
+                "shrinkage": ("shrinkage_count", 0.0, "shrinkage"),
+                "statistics": ("statistics", None, "statistics"),
+            }
+            for name, (key, value, message) in corruptions.items():
+                with self.subTest(name=name):
+                    artifact = self._artifact(vocabulary)
+                    artifact[key] = value
+                    output = root / f"{name}.pt"
+                    torch.save(artifact, output)
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_transition_dynamics_artifact(
+                            output,
+                            vocabulary_path=vocabulary,
+                            expected_source="raw",
+                            expected_n_token=2,
+                        )
+
+    def test_failed_atomic_save_preserves_existing_output(self):
+        self.assertIsNotNone(save_transition_dynamics_artifact)
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vocabulary = root / "agent_vocab.pkl"
+            vocabulary.write_bytes(b"vocabulary-a")
+            output = root / "lookup.pt"
+            output.write_bytes(b"existing-output")
+            artifact = self._artifact(vocabulary)
+            artifact["values"] = torch.full(
+                (3, 2, 2, 3),
+                float("nan"),
+                dtype=torch.float16,
+            )
+
+            with self.assertRaisesRegex(ValueError, "non-finite"):
+                save_transition_dynamics_artifact(
+                    output,
+                    artifact,
+                    vocabulary_path=vocabulary,
+                )
+
+            self.assertEqual(output.read_bytes(), b"existing-output")
+            self.assertFalse((root / "lookup.pt.tmp").exists())
+
+    def test_make_rejects_invalid_table_and_parameters(self):
+        self.assertIsNotNone(make_transition_dynamics_artifact)
+        with TemporaryDirectory() as temp_dir:
+            vocabulary = Path(temp_dir) / "agent_vocab.pkl"
+            vocabulary.write_bytes(b"vocabulary-a")
+            values = np.zeros((3, 2, 2, 3), dtype=np.float16)
+            common = {
+                "vocabulary_path": vocabulary,
+                "source": "raw",
+                "dt": 0.1,
+                "clipping_limits": (15.0, 3.0, 15.0),
+                "shrinkage_count": 8.0,
+                "statistics": {},
+            }
+
+            with self.assertRaisesRegex(ValueError, "shape"):
+                make_transition_dynamics_artifact(
+                    np.zeros((3, 2, 3), dtype=np.float16),
+                    **common,
+                )
+            with self.assertRaisesRegex(ValueError, "source"):
+                make_transition_dynamics_artifact(
+                    values,
+                    **{**common, "source": "validation"},
+                )
+            with self.assertRaisesRegex(ValueError, "dt"):
+                make_transition_dynamics_artifact(
+                    values,
+                    **{**common, "dt": 0.0},
+                )
+            with self.assertRaisesRegex(ValueError, "clipping_limits"):
+                make_transition_dynamics_artifact(
+                    values,
+                    **{**common, "clipping_limits": (15.0, 3.0)},
+                )
+            with self.assertRaisesRegex(ValueError, "shrinkage_count"):
+                make_transition_dynamics_artifact(
+                    values,
+                    **{**common, "shrinkage_count": 0.0},
+                )
 
 
 if __name__ == "__main__":
