@@ -14,6 +14,7 @@ import torch
 from src.smart.tokens.transition_dynamics import TransitionDynamicsAccumulator
 from src.smart.tokens.transition_dynamics_artifact import (
     load_transition_dynamics_artifact,
+    vocabulary_sha256,
 )
 
 from src.smart.tokens.build_transition_dynamics import (
@@ -218,6 +219,21 @@ class TransitionDynamicsBatchTest(unittest.TestCase):
 
 
 class TransitionDynamicsCliTest(unittest.TestCase):
+    def test_module_entrypoint_runs_after_batch_helpers_are_defined(self):
+        module_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "smart"
+            / "tokens"
+            / "build_transition_dynamics.py"
+        )
+        source = module_path.read_text(encoding="utf-8")
+
+        self.assertGreater(
+            source.index('if __name__ == "__main__":'),
+            source.index("def accumulate_tokenized_batch("),
+        )
+
     def test_parser_accepts_training_only_inputs(self):
         self.assertIsNotNone(
             build_parser,
@@ -364,6 +380,15 @@ class TransitionDynamicsCliTest(unittest.TestCase):
             self.assertEqual(summary["scenarios"], 1)
             self.assertEqual(summary["accepted_occurrences"], 2)
             self.assertEqual(summary["source"], "raw")
+            self.assertEqual(summary["vocabulary_size"], 2)
+            self.assertEqual(
+                summary["vocabulary_sha256"],
+                vocabulary_sha256(vocabulary),
+            )
+            self.assertEqual(
+                summary["occurrences_by_class"],
+                {"veh": 2, "ped": 0, "cyc": 0},
+            )
 
     def test_module_help_exposes_training_only_command(self):
         self.assertIsNotNone(main, "transition dynamics CLI entry point is missing")

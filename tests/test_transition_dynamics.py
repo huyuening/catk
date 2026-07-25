@@ -280,6 +280,10 @@ class TransitionDynamicsAccumulatorTest(unittest.TestCase):
         np.testing.assert_allclose(table[1, 0, 1], [3.0, 0.3, 4.0], atol=2e-3)
         np.testing.assert_allclose(table[2, 0, 1], [5.0, 0.5, 6.0], atol=2e-3)
         self.assertEqual(statistics["occurrences"], 3)
+        self.assertEqual(
+            statistics["occurrences_by_class"],
+            {"veh": 1, "ped": 1, "cyc": 1},
+        )
 
     def test_accumulator_rejects_invalid_shapes_indices_and_fallback(self):
         self.assertIsNotNone(TransitionDynamicsAccumulator)

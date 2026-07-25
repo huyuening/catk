@@ -202,9 +202,9 @@ class SMARTAgentDecoder(nn.Module):
         agent_shape,  # [n_agent, 3]
         history_dynamics=None,  # [n_agent, n_history_token, 3]
         history_dynamics_valid=None,  # [n_agent, n_history_token]
-        agent_token_dynamics_veh=None,  # [n_token, 3]
-        agent_token_dynamics_ped=None,  # [n_token, 3]
-        agent_token_dynamics_cyc=None,  # [n_token, 3]
+        agent_token_dynamics_veh=None,  # [n_token, n_token, 3]
+        agent_token_dynamics_ped=None,  # [n_token, n_token, 3]
+        agent_token_dynamics_cyc=None,  # [n_token, n_token, 3]
         inference=False,
     ):
         n_agent, n_step, traj_dim = pos_a.shape

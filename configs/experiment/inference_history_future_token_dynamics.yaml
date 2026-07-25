@@ -9,5 +9,7 @@ model:
   model_config:
     future_token_dynamics:
       is_active: true
+      lookup_file: null
+      source: raw
     token_processor:
       agent_token_file: agent_vocab_555_s2.pkl

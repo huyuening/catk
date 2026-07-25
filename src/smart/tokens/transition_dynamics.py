@@ -149,6 +149,10 @@ class TransitionDynamicsAccumulator:
 
         statistics = {
             "occurrences": int(self.pair_count.sum()),
+            "occurrences_by_class": {
+                name: int(self.pair_count[index].sum())
+                for index, name in enumerate(self._CLASS_NAMES)
+            },
             "observed_pairs": {
                 name: int(np.count_nonzero(self.pair_count[index]))
                 for index, name in enumerate(self._CLASS_NAMES)

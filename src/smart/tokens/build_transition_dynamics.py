@@ -36,6 +36,7 @@ from src.smart.tokens.transition_dynamics import (
 from src.smart.tokens.transition_dynamics_artifact import (
     make_transition_dynamics_artifact,
     save_transition_dynamics_artifact,
+    vocabulary_sha256,
 )
 
 
@@ -171,6 +172,8 @@ def build_transition_dynamics(
     summary = {
         "source": source,
         "scenarios": int(scenario_count),
+        "vocabulary_sha256": vocabulary_sha256(agent_token_file),
+        "vocabulary_size": n_token,
         **scan_statistics,
         **coverage_statistics,
     }
@@ -285,10 +288,6 @@ def main(argv: list[str] | None = None) -> None:
     )
     print(f"Transition dynamics artifact: {output}")
     print(f"Summary: {output.with_suffix('.summary.json')}")
-
-
-if __name__ == "__main__":
-    main()
 
 
 def _as_numpy(value) -> np.ndarray:
@@ -450,3 +449,7 @@ def accumulate_tokenized_batch(
         "accepted_occurrences": accepted_count,
         "skipped_occurrences": candidate_count - accepted_count,
     }
+
+
+if __name__ == "__main__":
+    main()

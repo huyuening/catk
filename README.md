@@ -158,6 +158,9 @@ bash scripts/train.sh
 Continue with `experiment=clsft_history_dynamics` and evaluate a compatible
 checkpoint with `experiment=inference_history_dynamics`.  A checkpoint trained
 without this branch should be evaluated with the original experiment config.
+To additionally condition future tokens on a fixed transition table built from
+complete training trajectories, follow
+[Training-Trajectory Token-Transition Dynamics](docs/training-trajectory-transition-dynamics.md).
 
 ## Run the code
 In the scripts, we provide

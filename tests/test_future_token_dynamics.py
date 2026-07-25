@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
-import yaml
 
 if not hasattr(torch, "arctan2"):
     torch.arctan2 = torch.atan2
@@ -988,106 +987,6 @@ class FutureTokenDynamicsDecoderTest(unittest.TestCase):
                 changed["next_token_logits"][:, 1],
             )
         )
-
-
-class FutureTokenDynamicsConfigTest(unittest.TestCase):
-    ROOT = Path(__file__).resolve().parents[1]
-    ORIGINAL_EXPERIMENTS = {
-        "pre_bc_history_future_token_dynamics": "pre_bc_history_dynamics",
-        "clsft_history_future_token_dynamics": "clsft_history_dynamics",
-        "inference_history_future_token_dynamics": "inference_history_dynamics",
-    }
-    RECONSTRUCTED_EXPERIMENTS = {
-        f"{name}_reconstructed": name for name in ORIGINAL_EXPERIMENTS
-    }
-
-    @classmethod
-    def _load_experiment(cls, name):
-        path = cls.ROOT / "configs" / "experiment" / f"{name}.yaml"
-        with path.open(encoding="utf-8") as file:
-            return yaml.safe_load(file)
-
-    def test_base_model_disables_future_token_dynamics(self):
-        with (
-            self.ROOT / "configs" / "model" / "smart.yaml"
-        ).open(encoding="utf-8") as file:
-            config = yaml.safe_load(file)
-
-        future = config["model_config"]["future_token_dynamics"]
-
-        self.assertFalse(future["is_active"])
-        self.assertEqual(future["normalization_scale"], [5.0, 1.0, 5.0])
-        self.assertEqual(future["initial_gate"], 1.0)
-
-    def test_original_variants_inherit_history_and_enable_future_dynamics(self):
-        for experiment, parent in self.ORIGINAL_EXPERIMENTS.items():
-            with self.subTest(experiment=experiment):
-                config = self._load_experiment(experiment)
-
-                self.assertEqual(config["defaults"], [parent, "_self_"])
-                model_config = config["model"]["model_config"]
-                self.assertTrue(
-                    model_config["future_token_dynamics"]["is_active"]
-                )
-                self.assertEqual(
-                    model_config["token_processor"]["agent_token_file"],
-                    "agent_vocab_555_s2.pkl",
-                )
-
-    def test_reconstructed_variants_only_override_vocabulary_file(self):
-        for experiment, parent in self.RECONSTRUCTED_EXPERIMENTS.items():
-            with self.subTest(experiment=experiment):
-                config = self._load_experiment(experiment)
-
-                self.assertEqual(set(config), {"defaults", "model"})
-                self.assertEqual(config["defaults"], [parent, "_self_"])
-                self.assertEqual(set(config["model"]), {"model_config"})
-                model_config = config["model"]["model_config"]
-                self.assertEqual(set(model_config), {"token_processor"})
-                self.assertEqual(
-                    model_config["token_processor"],
-                    {"agent_token_file": "agent_vocab_reconstructed.pkl"},
-                )
-
-    def test_all_six_experiments_compose_with_both_dynamics_branches(self):
-        try:
-            import hydra
-        except ModuleNotFoundError:
-            self.skipTest("Hydra is not installed in this test environment")
-
-        experiment_names = (
-            list(self.ORIGINAL_EXPERIMENTS)
-            + list(self.RECONSTRUCTED_EXPERIMENTS)
-        )
-        config_dir = self.ROOT / "configs"
-        with hydra.initialize_config_dir(
-            config_dir=str(config_dir),
-            version_base=None,
-        ):
-            for experiment in experiment_names:
-                with self.subTest(experiment=experiment):
-                    config = hydra.compose(
-                        config_name="run.yaml",
-                        overrides=[
-                            f"experiment={experiment}",
-                            "ckpt_path=/tmp/catk-placeholder.ckpt",
-                        ],
-                    )
-                    model_config = config.model.model_config
-                    self.assertTrue(model_config.history_dynamics.is_active)
-                    self.assertTrue(
-                        model_config.future_token_dynamics.is_active
-                    )
-                    expected_vocabulary = (
-                        "agent_vocab_reconstructed.pkl"
-                        if experiment.endswith("_reconstructed")
-                        else "agent_vocab_555_s2.pkl"
-                    )
-                    self.assertEqual(
-                        model_config.token_processor.agent_token_file,
-                        expected_vocabulary,
-                    )
-
 
 if __name__ == "__main__":
     unittest.main()

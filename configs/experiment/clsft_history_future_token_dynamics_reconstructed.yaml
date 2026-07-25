@@ -6,5 +6,7 @@ defaults:
 
 model:
   model_config:
+    future_token_dynamics:
+      source: reconstructed
     token_processor:
       agent_token_file: agent_vocab_reconstructed.pkl

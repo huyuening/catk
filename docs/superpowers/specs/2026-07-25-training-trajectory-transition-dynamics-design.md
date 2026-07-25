@@ -219,6 +219,7 @@ Extend `future_token_dynamics` configuration with:
 future_token_dynamics:
   is_active: false
   lookup_file: null
+  source: raw
   normalization_scale: [5.0, 1.0, 5.0]
   initial_gate: 1.0
 ```

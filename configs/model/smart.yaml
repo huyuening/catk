@@ -22,10 +22,14 @@ model_config:
     # [signed longitudinal acceleration, angular speed, lateral acceleration]
     normalization_scale: [5.0, 1.0, 5.0]
     initial_gate: 1.0
-  # Optional causal dynamics read from the vocabulary token selected at the
-  # preceding autoregressive step. Disabled for legacy CatK checkpoints.
+  # Optional causal dynamics from a fixed training-only lookup keyed by the
+  # previous/current token pair. Disabled for legacy CatK checkpoints.
   future_token_dynamics:
     is_active: false
+    # Required only when the branch is active. Generated from training data.
+    lookup_file: null
+    # Must match the provenance recorded in lookup_file: {raw, reconstructed}.
+    source: raw
     # [signed longitudinal acceleration, angular speed, lateral acceleration]
     normalization_scale: [5.0, 1.0, 5.0]
     initial_gate: 1.0

@@ -11,7 +11,7 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-"""Optional causal conditioning from selected future vocabulary tokens."""
+"""Optional causal conditioning from selected future token transitions."""
 
 from __future__ import annotations
 
