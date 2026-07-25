@@ -72,14 +72,14 @@ frame (`current_time_index`) rather than an average that can include future
 frames.
 
 Trajectory reconstruction is isolated to offline vocabulary construction. The
-bundled geometric filter reconstructs each training trajectory over all 91
-available frames, then splits it into the same 0.5 s local segments consumed by
-CatK's K-disk clustering. Because this copy is never used as per-scenario
-history input or as a future target, the history/future boundary does not need a
-causal two-pass reconstruction. Never substitute the reconstructed
-vocabulary-source caches for the normal CatK training, validation, or testing
-caches. The bundled filter is distributed under the PolyForm Noncommercial
-License 1.0.0 in `src/smart/tokens`.
+bundled geometric filter and batch optimizer reconstruct each training
+trajectory over all 91 available frames, then split it into the same 0.5 s
+local segments consumed by CatK's K-disk clustering. Because this copy is never
+used as per-scenario history input or as a future target, the history/future
+boundary does not need a causal two-pass reconstruction. Never substitute the
+reconstructed vocabulary-source caches for the normal CatK training,
+validation, or testing caches. The bundled reconstruction code is distributed
+under the PolyForm Noncommercial License 1.0.0 in `src/smart/tokens`.
 
 ### Compare raw and reconstructed trajectory vocabularies
 
@@ -95,24 +95,25 @@ clustering.
 ```bash
 python -m src.smart.tokens.compare_trajectory_token_reconstruction \
   --input-path /path/to/preprocessed_scenario/training \
-  --output-dir outputs/trajectory_token_reconstruction_comparison \
+  --output-dir outputs/trajectory_token_batch \
   --vocab-output-dir src/smart/tokens \
-  --vocab-output-name agent_vocab_reconstructed.pkl \
-  --method filter \
+  --vocab-output-name agent_vocab_reconstructed_batch.pkl \
+  --method batch \
   --filter-strength strong \
   --num-clusters 2048 \
-  --num-workers 12 \
+  --num-workers 24 \
   --worker-backend process
 ```
 
-The final CatK-compatible vocabulary is written directly to
-`src/smart/tokens/agent_vocab_reconstructed.pkl`. Analysis vocabularies retain
-the maximum supported token count per class, while `*_agent_vocab.pkl` files
-trim every class to the same count for the existing `TokenProcessor`. Add
-`--write-reconstructed-tfrecord` only when a serialized audit copy is useful;
-that TFRecord is also vocabulary-only and must not be used as model inputs or
-labels. `--reconstruction-root` is optional and only needed for the external
-`batch` or `optimizer` methods.
+The example writes the final CatK-compatible vocabulary directly to
+`src/smart/tokens/agent_vocab_reconstructed_batch.pkl`. Analysis vocabularies
+retain the maximum supported token count per class, while `*_agent_vocab.pkl`
+files trim every class to the same count for the existing `TokenProcessor`.
+Add `--write-reconstructed-tfrecord` only when a serialized audit copy is
+useful; that TFRecord is also vocabulary-only and must not be used as model
+inputs or labels. Both `filter` and `batch` are bundled with CatK.
+`--reconstruction-root` is needed only for `optimizer`, or when explicitly
+overriding a bundled method with an external implementation.
 
 ### Optional causal history dynamics
 

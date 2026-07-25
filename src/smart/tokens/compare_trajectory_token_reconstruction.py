@@ -21,10 +21,10 @@ reduces disk use.  The agent dictionaries use the same keys, dtypes, history
 selection, interpolation, and 0.5 s segmentation rules as CatK.
 
 The original branch reproduces CatK's legacy linear gap interpolation and
-heading cleanup.  The reconstructed branch calls CatK's bundled geometric
-filter once on the complete 91-frame training trajectory and skips those legacy
-repairs.  These caches are vocabulary sources only: they are never substituted
-for CatK model inputs or training labels.
+heading cleanup.  The reconstructed branch calls CatK's bundled filter or
+batch implementation once on the complete 91-frame training trajectory and
+skips those legacy repairs.  These caches are vocabulary sources only: they
+are never substituted for CatK model inputs or training labels.
 """
 
 from __future__ import annotations
@@ -85,6 +85,19 @@ class WorkerConfig:
     reconstructed_cache_dir: str
 
 
+def _reconstruction_implementation(
+    method: str,
+    reconstruction_root: str | None,
+) -> str:
+    if reconstruction_root:
+        return "external"
+    if method == "filter":
+        return "catk_bundled_filter"
+    if method == "batch":
+        return "catk_bundled_batch"
+    return "external"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -103,9 +116,9 @@ def parse_args() -> argparse.Namespace:
         "--reconstruction-root",
         default=None,
         help=(
-            "Optional WOMD-Traffic-Signal-Data-Improvement checkout. The "
-            "default filter method is bundled with CatK; this is required "
-            "only for batch or optimizer."
+            "Optional WOMD-Traffic-Signal-Data-Improvement checkout. CatK "
+            "bundles filter and batch; an external root is required only "
+            "for optimizer, or may explicitly override a bundled method."
         ),
     )
     parser.add_argument(
@@ -691,9 +704,13 @@ def preprocess_dataset(args: argparse.Namespace, output_dir: Path) -> Dict[str, 
         _load_scenario_class()
         if reconstruction_root:
             bridge._load_reconstruction_entrypoint(reconstruction_root)
-        else:
+        elif args.method == "filter":
             importlib.import_module(
                 "src.smart.tokens.trajectory_filter_reconstructor"
+            )
+        elif args.method == "batch":
+            importlib.import_module(
+                "src.smart.tokens.trajectory_batch_optimizer"
             )
 
     writer = None
@@ -819,10 +836,9 @@ def _refresh_preprocessing_summary(
             "method": args.method,
             "filter_strength": args.filter_strength,
             "max_gap_frames": args.max_gap_frames,
-            "implementation": (
-                "catk_bundled_filter"
-                if args.method == "filter" and not args.reconstruction_root
-                else "external"
+            "implementation": _reconstruction_implementation(
+                args.method,
+                args.reconstruction_root,
             ),
             "scope": "vocabulary_only",
             "uses_complete_training_trajectory": True,

@@ -1,18 +1,27 @@
 import argparse
 import pickle
+import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from src.smart.tokens.compare_trajectory_token_reconstruction import (
+    WorkerConfig,
     _canonical_cache_paths,
+    _load_scenario_class,
     _local_segment,
+    _process_scenario_task,
+    _reconstruction_implementation,
     _resolve_input_tfrecords,
     _vocab_export_path,
+    _write_output_readme,
     collect_segments,
     kdisk_cluster,
+    parse_args,
     polygon_contours,
     validate_cache_pairs,
 )
@@ -46,6 +55,109 @@ class TrajectoryTokenComparisonTest(unittest.TestCase):
 
         self.assertEqual(output_path.name, "agent_vocab_reconstructed.pkl")
         self.assertEqual(output_path.parent.name, "tokens")
+
+    def test_reconstruction_provenance_distinguishes_bundled_batch(self):
+        self.assertEqual(
+            _reconstruction_implementation("filter", None),
+            "catk_bundled_filter",
+        )
+        self.assertEqual(
+            _reconstruction_implementation("batch", None),
+            "catk_bundled_batch",
+        )
+        self.assertEqual(
+            _reconstruction_implementation("batch", "/external"),
+            "external",
+        )
+
+    def test_parser_accepts_bundled_batch_without_external_root(self):
+        with patch.object(
+            sys,
+            "argv",
+            ["compare", "--input-path", "/training", "--method", "batch"],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.method, "batch")
+        self.assertIsNone(args.reconstruction_root)
+
+    def test_bundled_batch_reproduction_command_omits_external_root(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory)
+            args = argparse.Namespace(
+                num_clusters=2048,
+                write_reconstructed_tfrecord=False,
+                vocab_output_dir="src/smart/tokens",
+                vocab_output_name="agent_vocab_reconstructed_batch.pkl",
+                input_tfrecord="/training",
+                reconstruction_root=None,
+                method="batch",
+                filter_strength="strong",
+                num_workers=24,
+                worker_backend="process",
+            )
+            _write_output_readme(output_dir, args)
+            reproduction = (output_dir / "README.md").read_text()
+
+        self.assertIn("--method batch", reproduction)
+        self.assertNotIn("--reconstruction-root", reproduction)
+
+    def test_worker_runs_bundled_batch_without_external_checkout(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            scenario_class = _load_scenario_class()
+        scenario = scenario_class()
+        scenario.scenario_id = "bundled-batch-smoke"
+        scenario.current_time_index = 10
+        scenario.sdc_track_index = 0
+        scenario.timestamps_seconds.extend(
+            (np.arange(91, dtype=float) * 0.1).tolist()
+        )
+        track = scenario.tracks.add()
+        track.id = 1
+        track.object_type = 1
+        for index in range(91):
+            state = track.states.add()
+            state.center_x = 0.2 * index
+            state.center_y = 0.0
+            state.heading = 0.0
+            state.length = 4.8
+            state.width = 2.0
+            state.height = 1.5
+            state.velocity_x = 2.0
+            state.valid = True
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            original_dir = root / "original"
+            reconstructed_dir = root / "reconstructed"
+            original_dir.mkdir()
+            reconstructed_dir.mkdir()
+            config = WorkerConfig(
+                reconstruction_root=None,
+                method="batch",
+                filter_strength="strong",
+                max_gap_frames=-1,
+                batch_linear_jerk_weight=1.0,
+                batch_angular_jerk_weight=1.0,
+                serialize_reconstructed=False,
+                original_cache_dir=str(original_dir),
+                reconstructed_cache_dir=str(reconstructed_dir),
+            )
+
+            result = _process_scenario_task(
+                (0, scenario.SerializeToString(), config)
+            )
+
+            self.assertEqual(result["scenario_id"], "bundled-batch-smoke")
+            self.assertEqual(result["original_agent_count"], 1)
+            self.assertEqual(result["reconstructed_agent_count"], 1)
+            self.assertTrue(
+                (original_dir / "bundled-batch-smoke.pkl").is_file()
+            )
+            self.assertTrue(
+                (reconstructed_dir / "bundled-batch-smoke.pkl").is_file()
+            )
 
     def test_macos_conflict_copies_are_not_consumed_as_scenarios(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
