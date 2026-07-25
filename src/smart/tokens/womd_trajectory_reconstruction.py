@@ -13,9 +13,9 @@
 
 """Vocabulary-only WOMD trajectory reconstruction for CatK.
 
-The geometric ``filter`` implementation is bundled with CatK.  The heavier
-``batch`` and ``optimizer`` implementations can still be loaded from an
-external WOMD-Traffic-Signal-Data-Improvement checkout when explicitly used.
+The geometric ``filter`` and SciPy ``batch`` implementations are bundled with
+CatK.  An explicit external checkout remains a compatibility override, while
+the legacy ``optimizer`` method still requires that checkout.
 
 The reconstructed Scenario produced here is a source for trajectory-vocabulary
 clustering only.  CatK model inputs and training labels remain untouched.
@@ -38,7 +38,7 @@ TRAJECTORY_RECONSTRUCTION_METHODS = ("none", "filter", "batch", "optimizer")
 
 @dataclass(frozen=True)
 class TrajectoryReconstructionConfig:
-    """Configuration for bundled filtering or an optional external solver."""
+    """Configuration for bundled reconstruction or an external override."""
 
     method: str = "none"
     project_root: Optional[str] = None
@@ -55,10 +55,10 @@ class TrajectoryReconstructionConfig:
                 f"Unknown trajectory reconstruction method '{self.method}'. "
                 f"Choose one of: {valid}"
             )
-        if self.method in ("batch", "optimizer") and not self.project_root:
+        if self.method == "optimizer" and not self.project_root:
             raise ValueError(
-                "--reconstruction-root is required for batch and optimizer "
-                "trajectory reconstruction"
+                "--reconstruction-root is required for optimizer trajectory "
+                "reconstruction"
             )
         if self.method != "none" and self.project_root:
             entrypoint = (
@@ -149,6 +149,22 @@ def reconstruct_scenario_agents(
                 config.filter_strength,
                 max_gap_frames=config.max_gap_frames,
             ),
+        )
+
+    if config.method == "batch" and not config.project_root:
+        from .trajectory_batch_optimizer import (
+            BatchTrajectoryConfig,
+            reconstruct_scenario_agents as reconstruct_with_batch,
+        )
+
+        return reconstruct_with_batch(
+            scenario,
+            config=BatchTrajectoryConfig(
+                linear_jerk_weight=config.batch_linear_jerk_weight,
+                angular_jerk_weight=config.batch_angular_jerk_weight,
+            ),
+            filter_strength=config.filter_strength,
+            max_gap_frames=config.max_gap_frames,
         )
 
     entrypoint = _load_reconstruction_entrypoint(config.project_root or "")

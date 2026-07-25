@@ -3,6 +3,7 @@ import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from src.smart.tokens.womd_trajectory_reconstruction import (
     TrajectoryReconstructionConfig,
@@ -22,9 +23,13 @@ class WomdTrajectoryReconstructionTest(unittest.TestCase):
         self.assertIs(reconstructed, scenario)
         self.assertIsNone(stats)
 
-    def test_advanced_reconstruction_requires_project_root(self):
-        with self.assertRaisesRegex(ValueError, "reconstruction-root"):
-            TrajectoryReconstructionConfig(method="batch")
+    def test_only_optimizer_requires_project_root(self):
+        config = TrajectoryReconstructionConfig(method="batch")
+
+        self.assertTrue(config.is_active)
+        self.assertIsNone(config.project_root)
+        with self.assertRaisesRegex(ValueError, "optimizer"):
+            TrajectoryReconstructionConfig(method="optimizer")
 
     def test_bundled_filter_does_not_require_project_root(self):
         config = TrajectoryReconstructionConfig(method="filter")
@@ -41,6 +46,40 @@ class WomdTrajectoryReconstructionTest(unittest.TestCase):
 
         self.assertIsNot(reconstructed, scenario)
         self.assertEqual(stats.total_tracks, 0)
+
+    def test_bundled_batch_reconstructs_without_external_checkout(self):
+        scenario = SimpleNamespace(timestamps_seconds=[], tracks=[])
+
+        reconstructed, stats = reconstruct_scenario_agents(
+            scenario, TrajectoryReconstructionConfig(method="batch")
+        )
+
+        self.assertIsNot(reconstructed, scenario)
+        self.assertEqual(type(stats).__name__, "BatchReconstructionStats")
+        self.assertEqual(stats.total_tracks, 0)
+
+    @patch(
+        "src.smart.tokens.trajectory_batch_optimizer."
+        "reconstruct_scenario_agents"
+    )
+    def test_bundled_batch_receives_exposed_weights(self, reconstruct):
+        reconstruct.return_value = ("scenario", "stats")
+        config = TrajectoryReconstructionConfig(
+            method="batch",
+            filter_strength="balanced",
+            max_gap_frames=4,
+            batch_linear_jerk_weight=1.5,
+            batch_angular_jerk_weight=2.5,
+        )
+
+        result = reconstruct_scenario_agents(object(), config)
+
+        self.assertEqual(result, ("scenario", "stats"))
+        call = reconstruct.call_args
+        self.assertEqual(call.kwargs["filter_strength"], "balanced")
+        self.assertEqual(call.kwargs["max_gap_frames"], 4)
+        self.assertEqual(call.kwargs["config"].linear_jerk_weight, 1.5)
+        self.assertEqual(call.kwargs["config"].angular_jerk_weight, 2.5)
 
     def test_external_project_is_loaded_in_an_isolated_namespace(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
