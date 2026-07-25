@@ -1,3 +1,4 @@
+import importlib.machinery
 import importlib.util
 import math
 import pickle
@@ -28,6 +29,10 @@ def _load_token_processor():
         and importlib.util.find_spec("omegaconf") is None
     ):
         omegaconf_stub = types.ModuleType("omegaconf")
+        omegaconf_stub.__spec__ = importlib.machinery.ModuleSpec(
+            "omegaconf",
+            loader=None,
+        )
         omegaconf_stub.DictConfig = dict
         sys.modules["omegaconf"] = omegaconf_stub
 
@@ -36,12 +41,30 @@ def _load_token_processor():
         and importlib.util.find_spec("torch_geometric") is None
     ):
         torch_geometric_stub = types.ModuleType("torch_geometric")
+        torch_geometric_stub.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric",
+            loader=None,
+            is_package=True,
+        )
         torch_geometric_stub.__path__ = []
         torch_geometric_data_stub = types.ModuleType("torch_geometric.data")
+        torch_geometric_data_stub.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric.data",
+            loader=None,
+        )
         torch_geometric_data_stub.HeteroData = dict
         torch_geometric_nn_stub = types.ModuleType("torch_geometric.nn")
+        torch_geometric_nn_stub.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric.nn",
+            loader=None,
+            is_package=True,
+        )
         torch_geometric_nn_stub.__path__ = []
         torch_geometric_conv_stub = types.ModuleType("torch_geometric.nn.conv")
+        torch_geometric_conv_stub.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric.nn.conv",
+            loader=None,
+        )
 
         class MessagePassing(torch.nn.Module):
             def __init__(self, *args, **kwargs):
@@ -49,6 +72,10 @@ def _load_token_processor():
 
         torch_geometric_conv_stub.MessagePassing = MessagePassing
         torch_geometric_utils_stub = types.ModuleType("torch_geometric.utils")
+        torch_geometric_utils_stub.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric.utils",
+            loader=None,
+        )
         torch_geometric_utils_stub.softmax = lambda value, *args, **kwargs: value
         torch_geometric_utils_stub.dense_to_sparse = (
             lambda value, *args, **kwargs: (
@@ -86,6 +113,10 @@ def _load_agent_decoder():
         and importlib.util.find_spec("torch_cluster") is None
     ):
         torch_cluster_stub = types.ModuleType("torch_cluster")
+        torch_cluster_stub.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_cluster",
+            loader=None,
+        )
 
         def unavailable(*args, **kwargs):
             raise AssertionError("graph radius function was not replaced in the test")
