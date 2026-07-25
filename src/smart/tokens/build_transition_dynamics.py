@@ -34,13 +34,14 @@ from src.smart.tokens.transition_dynamics import (
     extract_full_trajectory_dynamics,
 )
 from src.smart.tokens.transition_dynamics_artifact import (
+    HYBRID_SOURCE,
     make_transition_dynamics_artifact,
     save_transition_dynamics_artifact,
     vocabulary_sha256,
 )
 
 
-VALID_SOURCES = ("raw", "reconstructed")
+VALID_CACHE_SOURCES = ("raw", "reconstructed")
 TOKEN_SHIFT = 5
 
 
@@ -49,16 +50,18 @@ def build_parser() -> ArgumentParser:
 
     parser = ArgumentParser(
         description=(
-            "Build a fixed CatK token-transition dynamics table from one "
-            "training cache."
+            "Build a fixed CatK token-transition dynamics table from one or "
+            "two aligned training caches."
         )
     )
-    parser.add_argument("--training-dir", required=True)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--training-dir")
+    input_group.add_argument("--assignment-training-dir")
+    parser.add_argument("--dynamics-training-dir")
     parser.add_argument("--agent-token-file", required=True)
     parser.add_argument(
         "--source",
-        choices=VALID_SOURCES,
-        default="raw",
+        choices=(*VALID_CACHE_SOURCES, HYBRID_SOURCE),
     )
     parser.add_argument("--output", required=True)
     parser.add_argument(
@@ -101,8 +104,8 @@ def build_transition_dynamics(
             f"agent vocabulary does not exist: {agent_token_file}"
         )
     agent_token_file = agent_token_file.resolve()
-    if source not in VALID_SOURCES:
-        raise ValueError(f"source must be one of {VALID_SOURCES}")
+    if source not in VALID_CACHE_SOURCES:
+        raise ValueError(f"source must be one of {VALID_CACHE_SOURCES}")
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     if num_workers < 0:
@@ -207,10 +210,14 @@ def _load_runtime_components():
     from torch_geometric.loader import DataLoader
 
     from src.smart.datasets import MultiDataset
+    from src.smart.tokens.paired_transition_dataset import (
+        PairedTransitionDataset,
+    )
     from src.smart.tokens.token_processor import TokenProcessor
 
     return SimpleNamespace(
         MultiDataset=MultiDataset,
+        PairedTransitionDataset=PairedTransitionDataset,
         DataLoader=DataLoader,
         HeteroData=HeteroData,
         TokenProcessor=TokenProcessor,
@@ -273,19 +280,195 @@ def _load_isolated_fallback(agent_token_file: Path) -> np.ndarray:
     return np.stack(class_values, axis=0).astype(np.float64)
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
-    output = build_transition_dynamics(
-        training_dir=args.training_dir,
-        agent_token_file=args.agent_token_file,
-        output=args.output,
-        source=args.source,
-        map_token_file=args.map_token_file,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        max_scenarios=args.max_scenarios,
-        shrinkage_count=args.shrinkage_count,
+def build_paired_transition_dynamics(
+    assignment_training_dir: str | Path,
+    dynamics_training_dir: str | Path,
+    agent_token_file: str | Path,
+    output: str | Path,
+    *,
+    map_token_file: str | Path = "map_traj_token5.pkl",
+    batch_size: int = 8,
+    num_workers: int = 8,
+    max_scenarios: int | None = None,
+    shrinkage_count: float = 8.0,
+) -> Path:
+    """Build original-token transitions with reconstructed dynamics."""
+
+    assignment_training_dir = Path(assignment_training_dir)
+    dynamics_training_dir = Path(dynamics_training_dir)
+    agent_token_file = Path(agent_token_file)
+    output = Path(output)
+    for directory, label in (
+        (assignment_training_dir, "assignment training"),
+        (dynamics_training_dir, "dynamics training"),
+    ):
+        if not directory.is_dir():
+            raise FileNotFoundError(
+                f"{label} directory does not exist: {directory}"
+            )
+    if not agent_token_file.is_file():
+        raise FileNotFoundError(
+            f"agent vocabulary does not exist: {agent_token_file}"
+        )
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative")
+    if max_scenarios is not None and max_scenarios < 1:
+        raise ValueError("max_scenarios must be positive when provided")
+    if not np.isfinite(shrinkage_count) or shrinkage_count <= 0.0:
+        raise ValueError("shrinkage_count must be finite and positive")
+
+    agent_token_file = agent_token_file.resolve()
+    isolated_fallback = _load_isolated_fallback(agent_token_file)
+    n_token = int(isolated_fallback.shape[1])
+    accumulator = TransitionDynamicsAccumulator(
+        n_agent_types=3,
+        n_token=n_token,
     )
+    runtime = _load_runtime_components()
+    dataset = runtime.PairedTransitionDataset(
+        assignment_dir=assignment_training_dir,
+        dynamics_dir=dynamics_training_dir,
+        transform=lambda value: runtime.HeteroData(value),
+    )
+    scenario_count = len(dataset)
+    if max_scenarios is not None and max_scenarios < scenario_count:
+        scenario_count = max_scenarios
+        dataset = runtime.Subset(dataset, range(scenario_count))
+    loader = runtime.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        drop_last=False,
+    )
+
+    sampling = SimpleNamespace(num_k=1, temp=1.0)
+    processor = runtime.TokenProcessor(
+        map_token_file=str(map_token_file),
+        agent_token_file=str(agent_token_file),
+        map_token_sampling=sampling,
+        agent_token_sampling=sampling,
+        history_dynamics={"is_active": False},
+        future_token_dynamics={"is_active": False},
+    )
+    processor.eval()
+
+    scan_statistics = {
+        "candidate_occurrences": 0,
+        "accepted_occurrences": 0,
+        "skipped_occurrences": 0,
+    }
+    aligned_agents = 0
+    for assignment_batch, dynamics_batch in _progress(
+        loader,
+        description="paired training transition dynamics",
+    ):
+        assignment_snapshot = {
+            "agent": _snapshot_agent_store(assignment_batch["agent"])
+        }
+        validate_source_provenance(
+            assignment_snapshot["agent"],
+            "raw",
+            context="assignment training batch",
+        )
+        dynamics_snapshot = {
+            "agent": _snapshot_agent_store(dynamics_batch["agent"])
+        }
+        tokenized_agent = processor.tokenize_agent(assignment_batch)
+        batch_statistics = accumulate_tokenized_batch(
+            accumulator,
+            dynamics_snapshot,
+            tokenized_agent,
+            source="reconstructed",
+        )
+        aligned_agents += int(
+            len(dynamics_snapshot["agent"]["position"])
+        )
+        for key in scan_statistics:
+            scan_statistics[key] += int(batch_statistics[key])
+
+    values, coverage_statistics = accumulator.finalize(
+        isolated_fallback,
+        shrinkage_count=shrinkage_count,
+    )
+    summary = {
+        "source": HYBRID_SOURCE,
+        "assignment_source": "raw",
+        "dynamics_source": "reconstructed",
+        "scenarios": int(scenario_count),
+        "aligned_agents": int(aligned_agents),
+        "vocabulary_sha256": vocabulary_sha256(agent_token_file),
+        "vocabulary_size": n_token,
+        **scan_statistics,
+        **coverage_statistics,
+    }
+    artifact = make_transition_dynamics_artifact(
+        values,
+        vocabulary_path=agent_token_file,
+        source=HYBRID_SOURCE,
+        dt=0.1,
+        clipping_limits=(15.0, 3.0, 15.0),
+        shrinkage_count=shrinkage_count,
+        statistics=summary,
+    )
+    result = save_transition_dynamics_artifact(
+        output,
+        artifact,
+        vocabulary_path=agent_token_file,
+    )
+    output.with_suffix(".summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return result
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    common = {
+        "agent_token_file": args.agent_token_file,
+        "output": args.output,
+        "map_token_file": args.map_token_file,
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "max_scenarios": args.max_scenarios,
+        "shrinkage_count": args.shrinkage_count,
+    }
+    if args.assignment_training_dir is not None:
+        if args.dynamics_training_dir is None:
+            parser.error(
+                "--dynamics-training-dir is required with "
+                "--assignment-training-dir"
+            )
+        if args.source not in (None, HYBRID_SOURCE):
+            parser.error(
+                "paired mode source must be "
+                f"{HYBRID_SOURCE}"
+            )
+        output = build_paired_transition_dynamics(
+            assignment_training_dir=args.assignment_training_dir,
+            dynamics_training_dir=args.dynamics_training_dir,
+            **common,
+        )
+    else:
+        if args.dynamics_training_dir is not None:
+            parser.error(
+                "--dynamics-training-dir requires "
+                "--assignment-training-dir"
+            )
+        source = args.source or "raw"
+        if source == HYBRID_SOURCE:
+            parser.error(
+                f"{HYBRID_SOURCE} requires paired training directories"
+            )
+        output = build_transition_dynamics(
+            training_dir=args.training_dir,
+            source=source,
+            **common,
+        )
     print(f"Transition dynamics artifact: {output}")
     print(f"Summary: {output.with_suffix('.summary.json')}")
 
@@ -304,8 +487,8 @@ def validate_source_provenance(
 ) -> None:
     """Require a cache whose provenance matches the requested table family."""
 
-    if source not in VALID_SOURCES:
-        raise ValueError(f"source must be one of {VALID_SOURCES}")
+    if source not in VALID_CACHE_SOURCES:
+        raise ValueError(f"source must be one of {VALID_CACHE_SOURCES}")
     marker = agent_store.get("trajectory_reconstructed")
     if marker is None:
         if source == "reconstructed":

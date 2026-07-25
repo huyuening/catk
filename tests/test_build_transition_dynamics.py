@@ -13,6 +13,7 @@ import torch
 
 from src.smart.tokens.transition_dynamics import TransitionDynamicsAccumulator
 from src.smart.tokens.transition_dynamics_artifact import (
+    HYBRID_SOURCE,
     load_transition_dynamics_artifact,
     vocabulary_sha256,
 )
@@ -33,6 +34,13 @@ try:
     )
 except ImportError:
     build_transition_dynamics = None
+
+try:
+    from src.smart.tokens.build_transition_dynamics import (
+        build_paired_transition_dynamics,
+    )
+except ImportError:
+    build_paired_transition_dynamics = None
 
 try:
     from src.smart.tokens.build_transition_dynamics import main
@@ -219,6 +227,14 @@ class TransitionDynamicsBatchTest(unittest.TestCase):
 
 
 class TransitionDynamicsCliTest(unittest.TestCase):
+    def assert_main_error(self, arguments, message):
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as raised:
+            with contextlib.redirect_stderr(stderr):
+                main(arguments)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(message, stderr.getvalue())
+
     def test_module_entrypoint_runs_after_batch_helpers_are_defined(self):
         module_path = (
             Path(__file__).resolve().parents[1]
@@ -258,6 +274,33 @@ class TransitionDynamicsCliTest(unittest.TestCase):
         self.assertEqual(args.source, "raw")
         self.assertFalse(hasattr(args, "validation_dir"))
         self.assertFalse(hasattr(args, "test_dir"))
+
+    def test_parser_accepts_paired_training_inputs(self):
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "--assignment-training-dir",
+                "/cache/original/training",
+                "--dynamics-training-dir",
+                "/cache/reconstructed/training",
+                "--agent-token-file",
+                "/tokens/agent.pkl",
+                "--output",
+                "/cache/lookup.pt",
+            ]
+        )
+
+        self.assertIsNone(args.training_dir)
+        self.assertEqual(
+            args.assignment_training_dir,
+            "/cache/original/training",
+        )
+        self.assertEqual(
+            args.dynamics_training_dir,
+            "/cache/reconstructed/training",
+        )
+        self.assertIsNone(args.source)
 
     def test_builder_rejects_missing_or_empty_training_directory_first(self):
         self.assertIsNotNone(
@@ -390,6 +433,178 @@ class TransitionDynamicsCliTest(unittest.TestCase):
                 {"veh": 2, "ped": 0, "cyc": 0},
             )
 
+    def test_paired_builder_uses_original_tokens_and_reconstructed_values(self):
+        self.assertIsNotNone(
+            build_paired_transition_dynamics,
+            "paired transition builder is not implemented",
+        )
+        with TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            assignment_dir = root / "original"
+            dynamics_dir = root / "reconstructed"
+            assignment_dir.mkdir()
+            dynamics_dir.mkdir()
+            (assignment_dir / "scene.pkl").write_bytes(b"assignment")
+            (dynamics_dir / "scene.pkl").write_bytes(b"dynamics")
+            vocabulary = root / "agent.pkl"
+            token_all = {
+                name: np.zeros((2, 6, 4, 2), dtype=np.float32)
+                for name in ("veh", "ped", "cyc")
+            }
+            with vocabulary.open("wb") as stream:
+                pickle.dump({"token_all": token_all}, stream)
+
+            time = torch.arange(91, dtype=torch.float64) * 0.1
+            assignment = (
+                TransitionDynamicsBatchTest._constant_acceleration_batch()
+            )
+            assignment["agent"]["id"] = torch.tensor([10])
+            assignment["agent"]["trajectory_reconstructed"] = torch.tensor(
+                [False]
+            )
+            reconstructed = (
+                TransitionDynamicsBatchTest._constant_acceleration_batch()
+            )
+            reconstructed["agent"]["id"] = torch.tensor([10])
+            reconstructed["agent"]["position"][0, :, 0] = 3.0 * time.square()
+            reconstructed["agent"]["trajectory_reconstructed"] = torch.tensor(
+                [True]
+            )
+            tokenized = {
+                "type": torch.tensor([0]),
+                "gt_idx": torch.tensor([[0, 1]]),
+                "valid_mask": torch.tensor([[True, True]]),
+            }
+            processor_state = {"received_assignment": False}
+
+            class FakePairedDataset:
+                def __init__(
+                    self,
+                    assignment_dir,
+                    dynamics_dir,
+                    transform,
+                ):
+                    self.assignment_dir = assignment_dir
+                    self.dynamics_dir = dynamics_dir
+                    self.transform = transform
+                    self.items = [(assignment, reconstructed)]
+
+                def __len__(self):
+                    return len(self.items)
+
+            class FakeLoader:
+                def __init__(self, dataset, **kwargs):
+                    self.dataset = dataset
+                    self.kwargs = kwargs
+
+                def __iter__(self):
+                    return iter(self.dataset.items)
+
+            class FakeProcessor:
+                def __init__(self, **kwargs):
+                    self.kwargs = kwargs
+
+                def eval(self):
+                    return self
+
+                def tokenize_agent(self, data):
+                    processor_state["received_assignment"] = data is assignment
+                    return tokenized
+
+            runtime = SimpleNamespace(
+                PairedTransitionDataset=FakePairedDataset,
+                DataLoader=FakeLoader,
+                HeteroData=dict,
+                TokenProcessor=FakeProcessor,
+                Subset=lambda dataset, indices: dataset,
+            )
+            output = root / "hybrid.pt"
+            with patch(
+                "src.smart.tokens.build_transition_dynamics."
+                "_load_runtime_components",
+                return_value=runtime,
+            ):
+                build_paired_transition_dynamics(
+                    assignment_training_dir=assignment_dir,
+                    dynamics_training_dir=dynamics_dir,
+                    agent_token_file=vocabulary,
+                    output=output,
+                    batch_size=1,
+                    num_workers=0,
+                )
+
+            self.assertTrue(processor_state["received_assignment"])
+            table = load_transition_dynamics_artifact(
+                output,
+                vocabulary_path=vocabulary,
+                expected_source=HYBRID_SOURCE,
+                expected_n_token=2,
+            )
+            self.assertAlmostEqual(
+                float(table[0, 0, 1, 0]),
+                6.0,
+                delta=2e-3,
+            )
+            summary = json.loads(
+                output.with_suffix(".summary.json").read_text()
+            )
+            self.assertEqual(summary["assignment_source"], "raw")
+            self.assertEqual(
+                summary["dynamics_source"],
+                "reconstructed",
+            )
+            self.assertEqual(summary["source"], HYBRID_SOURCE)
+            self.assertEqual(summary["aligned_agents"], 1)
+
+    def test_cli_rejects_incomplete_or_mixed_input_modes(self):
+        common = [
+            "--agent-token-file",
+            "/tokens/agent.pkl",
+            "--output",
+            "/cache/lookup.pt",
+        ]
+        cases = (
+            (
+                [
+                    "--assignment-training-dir",
+                    "/cache/original/training",
+                ],
+                "--dynamics-training-dir is required",
+            ),
+            (
+                [
+                    "--training-dir",
+                    "/cache/training",
+                    "--dynamics-training-dir",
+                    "/cache/reconstructed/training",
+                ],
+                "--dynamics-training-dir requires",
+            ),
+            (
+                [
+                    "--training-dir",
+                    "/cache/training",
+                    "--source",
+                    HYBRID_SOURCE,
+                ],
+                "requires paired training directories",
+            ),
+            (
+                [
+                    "--assignment-training-dir",
+                    "/cache/original/training",
+                    "--dynamics-training-dir",
+                    "/cache/reconstructed/training",
+                    "--source",
+                    "raw",
+                ],
+                "paired mode source must be",
+            ),
+        )
+        for arguments, message in cases:
+            with self.subTest(message=message):
+                self.assert_main_error(arguments + common, message)
+
     def test_module_help_exposes_training_only_command(self):
         self.assertIsNotNone(main, "transition dynamics CLI entry point is missing")
         stdout = io.StringIO()
@@ -400,6 +615,8 @@ class TransitionDynamicsCliTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         help_text = stdout.getvalue()
         self.assertIn("--training-dir", help_text)
+        self.assertIn("--assignment-training-dir", help_text)
+        self.assertIn("--dynamics-training-dir", help_text)
         self.assertIn("--agent-token-file", help_text)
         self.assertIn("--source", help_text)
         self.assertIn("--output", help_text)
