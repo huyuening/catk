@@ -46,10 +46,34 @@ python -m src.smart.tokens.build_transition_dynamics \
   --output "$RECON_LOOKUP"
 ```
 
+### Original vocabulary with reconstructed transition values
+
+This hybrid keeps every token assignment in the original CatK vocabulary.
+The paired builder matches tokens from `datasets/original/training`, aligns
+the same agents in `datasets/reconstructed/training`, and calculates the three
+dynamics values from the reconstructed trajectories:
+
+```bash
+export CATK_ROOT=/root/workspace/catk
+export RECON_OUTPUT=/mnt/pfs/waymo_motion_1_3_0/catk_batch_vocab_v1
+
+bash scripts/build_original_vocab_reconstructed_dynamics.sh
+```
+
+The default artifact is:
+
+```text
+$RECON_OUTPUT/agent_transition_dynamics_original_vocab_reconstructed.pt
+```
+
+Set `MAX_SCENARIOS` only for a smoke test. Omit it to scan the complete
+training split.
+
 The reconstructed cache must contain
 `agent.trajectory_reconstructed=true` for every agent. The raw builder rejects
 that marker, while the reconstructed builder requires it; this prevents the
-two table families from being mixed accidentally.
+two table families from being mixed accidentally. Hybrid mode additionally
+requires equal scenario-file sets and aligns agents by unique `agent.id`.
 
 Each command writes:
 
@@ -102,6 +126,19 @@ bash scripts/train.sh \
   model.model_config.future_token_dynamics.lookup_file="$LOOKUP_FILE"
 ```
 
+Original vocabulary with reconstructed transition values:
+
+```bash
+export CACHE_ROOT=/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario_history_dynamics_exact
+export LOOKUP_FILE=/mnt/pfs/waymo_motion_1_3_0/catk_batch_vocab_v1/agent_transition_dynamics_original_vocab_reconstructed.pt
+export MY_EXPERIMENT=pre_bc_history_future_token_dynamics_hybrid
+export MY_TASK_NAME=pre_bc_history_future_token_dynamics_hybrid_b200
+
+bash scripts/train.sh \
+  ckpt_path=null \
+  model.model_config.future_token_dynamics.lookup_file="$LOOKUP_FILE"
+```
+
 `CACHE_ROOT` above remains the normal CatK runtime cache containing
 `history_dynamics` for training and validation. The reconstructed,
 agent-only training cache is used only by the offline lookup builder.
@@ -129,6 +166,19 @@ clsft_history_future_token_dynamics_reconstructed
 
 and provide the reconstructed lookup.
 
+For the original-vocabulary hybrid family:
+
+```bash
+export PRE_BC_CKPT=/path/to/pre_bc/checkpoints/last.ckpt
+export LOOKUP_FILE=/mnt/pfs/waymo_motion_1_3_0/catk_batch_vocab_v1/agent_transition_dynamics_original_vocab_reconstructed.pt
+
+MY_EXPERIMENT=clsft_history_future_token_dynamics_hybrid \
+MY_TASK_NAME=clsft_history_future_token_dynamics_hybrid_b200 \
+bash scripts/train.sh \
+  ckpt_path="$PRE_BC_CKPT" \
+  model.model_config.future_token_dynamics.lookup_file="$LOOKUP_FILE"
+```
+
 ## 4. Full validation
 
 Raw family:
@@ -155,6 +205,18 @@ python run.py \
   task_name=history_future_token_dynamics_reconstructed_full
 ```
 
+Original-vocabulary hybrid family:
+
+```bash
+CATK_CKPT=/path/to/checkpoints/last.ckpt \
+CACHE_ROOT=/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario_history_dynamics_exact \
+python run.py \
+  experiment=inference_history_future_token_dynamics_hybrid \
+  model.model_config.future_token_dynamics.lookup_file=/mnt/pfs/waymo_motion_1_3_0/catk_batch_vocab_v1/agent_transition_dynamics_original_vocab_reconstructed.pt \
+  trainer.limit_val_batches=1.0 \
+  task_name=hybrid_transition_dynamics_full
+```
+
 Use a fractional `trainer.limit_val_batches`, such as `0.1`, for a deterministic
 prefix of the validation loader rather than the full set.
 
@@ -163,6 +225,8 @@ prefix of the validation loader rather than the full set.
 - A raw checkpoint, raw vocabulary, and raw lookup form one compatible family.
 - A reconstructed checkpoint, reconstructed vocabulary, and reconstructed
   lookup form the other compatible family.
+- A hybrid checkpoint, original vocabulary, and
+  `raw_tokens_reconstructed_dynamics` lookup form a third compatible family.
 - The same fixed lookup must be used for pre-BC, CLSFT, and evaluation of a
   given run family.
 - The lookup contains no trainable parameters and is registered as a
