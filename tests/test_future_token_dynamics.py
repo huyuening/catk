@@ -22,6 +22,18 @@ from src.smart.tokens.future_token_dynamics import (
     gather_future_token_dynamics,
 )
 
+try:
+    from src.smart.tokens.future_token_dynamics import (
+        gather_transition_dynamics,
+    )
+except ImportError:
+    gather_transition_dynamics = None
+
+from src.smart.tokens.transition_dynamics_artifact import (
+    make_transition_dynamics_artifact,
+    save_transition_dynamics_artifact,
+)
+
 
 def _load_token_processor():
     if (
@@ -327,6 +339,33 @@ class FutureTokenDynamicsLookupTest(unittest.TestCase):
                 dynamics_cyc=lookup,
             )
 
+    def test_pair_gather_uses_previous_current_indices_and_agent_type(self):
+        self.assertIsNotNone(
+            gather_transition_dynamics,
+            "token-transition gather is not implemented",
+        )
+        vehicle = torch.arange(12, dtype=torch.float32).view(2, 2, 3)
+        pedestrian = vehicle + 100.0
+        cyclist = vehicle + 200.0
+
+        gathered = gather_transition_dynamics(
+            previous_token_index=torch.tensor([[0, 1], [1, 0], [1, 1]]),
+            current_token_index=torch.tensor([[1, 0], [0, 1], [1, 0]]),
+            agent_type=torch.tensor([0, 1, 2]),
+            dynamics_veh=vehicle,
+            dynamics_ped=pedestrian,
+            dynamics_cyc=cyclist,
+        )
+
+        expected = torch.stack(
+            (
+                torch.stack((vehicle[0, 1], vehicle[1, 0])),
+                torch.stack((pedestrian[1, 0], pedestrian[0, 1])),
+                torch.stack((cyclist[1, 1], cyclist[1, 0])),
+            )
+        )
+        torch.testing.assert_close(gathered, expected)
+
 
 class FutureTokenDynamicsTokenProcessorTest(unittest.TestCase):
     class _FakeHeteroData(dict):
@@ -368,10 +407,15 @@ class FutureTokenDynamicsTokenProcessorTest(unittest.TestCase):
         }
 
     @staticmethod
-    def _processor(active=True):
+    def _processor(active=True, config=None):
         processor = TokenProcessor.__new__(TokenProcessor)
         torch.nn.Module.__init__(processor)
         processor.future_token_dynamics_active = active
+        processor.future_token_dynamics_config = (
+            config
+            if config is not None
+            else {"is_active": active}
+        )
         processor.history_dynamics_active = False
         processor.agent_token_sampling = SimpleNamespace(num_k=1, temp=1.0)
         processor.shift = 5
@@ -384,29 +428,72 @@ class FutureTokenDynamicsTokenProcessorTest(unittest.TestCase):
             pickle.dump(payload, file)
         return path
 
-    def test_active_processor_registers_class_separated_nonpersistent_lookups(self):
+    @staticmethod
+    def _write_transition_artifact(directory, vocabulary_path, source="raw"):
+        values = (
+            torch.arange(36, dtype=torch.float32)
+            .to(torch.float16)
+            .view(3, 2, 2, 3)
+            .numpy()
+        )
+        artifact = make_transition_dynamics_artifact(
+            values,
+            vocabulary_path=vocabulary_path,
+            source=source,
+            dt=0.1,
+            clipping_limits=(15.0, 3.0, 15.0),
+            shrinkage_count=8.0,
+            statistics={},
+        )
+        output = save_transition_dynamics_artifact(
+            Path(directory) / "lookup.pt",
+            artifact,
+            vocabulary_path=vocabulary_path,
+        )
+        return output, values
+
+    def test_active_processor_requires_transition_lookup_file(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self._write_pickle(directory, self._vocabulary())
             processor = self._processor(active=True)
 
+            with self.assertRaisesRegex(ValueError, "lookup_file"):
+                processor.init_agent_token(str(path))
+
+    def test_active_processor_loads_vocabulary_bound_transition_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_pickle(directory, self._vocabulary())
+            lookup_path, values = self._write_transition_artifact(
+                directory,
+                path,
+            )
+            processor = self._processor(
+                active=True,
+                config={
+                    "is_active": True,
+                    "lookup_file": str(lookup_path),
+                    "source": "raw",
+                },
+            )
+
             processor.init_agent_token(str(path))
 
-        self.assertEqual(tuple(processor.agent_token_dynamics_veh.shape), (2, 3))
-        self.assertEqual(tuple(processor.agent_token_dynamics_ped.shape), (2, 3))
-        self.assertEqual(tuple(processor.agent_token_dynamics_cyc.shape), (2, 3))
-        self.assertTrue(
-            torch.allclose(
-                processor.agent_token_dynamics_veh[:, 0],
-                torch.tensor([1.0, 2.0]),
-                atol=1e-4,
-                rtol=1e-4,
-            )
+        self.assertEqual(
+            tuple(processor.agent_token_dynamics_veh.shape),
+            (2, 2, 3),
         )
-        self.assertFalse(
-            torch.equal(
-                processor.agent_token_dynamics_veh,
-                processor.agent_token_dynamics_ped,
-            )
+        self.assertEqual(processor.agent_token_dynamics_veh.dtype, torch.float16)
+        torch.testing.assert_close(
+            processor.agent_token_dynamics_veh,
+            torch.from_numpy(values[0]),
+        )
+        torch.testing.assert_close(
+            processor.agent_token_dynamics_ped,
+            torch.from_numpy(values[1]),
+        )
+        torch.testing.assert_close(
+            processor.agent_token_dynamics_cyc,
+            torch.from_numpy(values[2]),
         )
         state_keys = set(processor.state_dict())
         self.assertNotIn("agent_token_dynamics_veh", state_keys)
@@ -427,7 +514,15 @@ class FutureTokenDynamicsTokenProcessorTest(unittest.TestCase):
     def test_tokenized_agent_exposes_lookup_tables_without_copying_them(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self._write_pickle(directory, self._vocabulary())
-            processor = self._processor(active=True)
+            lookup_path, _ = self._write_transition_artifact(directory, path)
+            processor = self._processor(
+                active=True,
+                config={
+                    "is_active": True,
+                    "lookup_file": str(lookup_path),
+                    "source": "raw",
+                },
+            )
             processor.init_agent_token(str(path))
 
         n_agent = 3

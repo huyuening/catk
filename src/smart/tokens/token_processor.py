@@ -21,8 +21,9 @@ from torch import Tensor
 from torch.distributions import Categorical
 from torch_geometric.data import HeteroData
 
-from src.smart.tokens.future_token_dynamics import (
-    build_future_token_dynamics_lookup,
+from src.smart.tokens.transition_dynamics_artifact import (
+    VALID_SOURCES as TRANSITION_DYNAMICS_SOURCES,
+    load_transition_dynamics_artifact,
 )
 from src.smart.utils import (
     cal_polygon_contour,
@@ -55,6 +56,7 @@ class TokenProcessor(torch.nn.Module):
             future_token_dynamics is not None
             and future_token_dynamics.get("is_active", False)
         )
+        self.future_token_dynamics_config = future_token_dynamics
         self.shift = 5
 
         module_dir = os.path.dirname(__file__)
@@ -110,24 +112,56 @@ class TokenProcessor(torch.nn.Module):
             v = token_all[k]
             v = torch.tensor(v, dtype=torch.float32)
             # [n_token, 6, 4, 2], countour, 10 hz
+            if v.ndim != 4 or tuple(v.shape[1:]) != (6, 4, 2):
+                raise ValueError(
+                    f"{agent_token_path}: class {k} token trajectory must "
+                    "have shape [n_token, 6, 4, 2]"
+                )
+            if not torch.isfinite(v).all():
+                raise ValueError(
+                    f"{agent_token_path}: class {k} token trajectory "
+                    "contains non-finite values"
+                )
             self.register_buffer(f"agent_token_all_{k}", v, persistent=False)
             token_counts[k] = int(v.shape[0]) if v.ndim > 0 else 0
-            if self.future_token_dynamics_active:
-                dynamics = build_future_token_dynamics_lookup(
-                    v,
-                    context=f"{agent_token_path} class {k}",
-                )
-                self.register_buffer(
-                    f"agent_token_dynamics_{k}",
-                    dynamics,
-                    persistent=False,
-                )
 
         if len(set(token_counts.values())) != 1:
             raise ValueError(
                 f"{agent_token_path}: veh, ped, and cyc must have the same "
                 f"token count, got {token_counts}"
             )
+        if self.future_token_dynamics_active:
+            config = self.future_token_dynamics_config
+            lookup_file = (
+                config.get("lookup_file")
+                if config is not None
+                else None
+            )
+            if not lookup_file:
+                raise ValueError(
+                    "future_token_dynamics.lookup_file is required when "
+                    "future token dynamics are active"
+                )
+            source = config.get("source", "raw")
+            if source not in TRANSITION_DYNAMICS_SOURCES:
+                raise ValueError(
+                    "future_token_dynamics.source must be raw or reconstructed"
+                )
+            lookup_path = str(lookup_file)
+            if not os.path.isabs(lookup_path):
+                lookup_path = os.path.join(os.path.dirname(__file__), lookup_path)
+            dynamics = load_transition_dynamics_artifact(
+                lookup_path,
+                vocabulary_path=agent_token_path,
+                expected_source=source,
+                expected_n_token=next(iter(token_counts.values())),
+            )
+            for class_index, class_name in enumerate(agent_classes):
+                self.register_buffer(
+                    f"agent_token_dynamics_{class_name}",
+                    dynamics[class_index],
+                    persistent=False,
+                )
 
     def tokenize_map(self, data: HeteroData) -> Dict[str, Tensor]:
         traj_pos = data["map_save"]["traj_pos"]  # [n_pl, 3, 2]

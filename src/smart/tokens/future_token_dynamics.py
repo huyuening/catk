@@ -173,3 +173,78 @@ def gather_future_token_dynamics(
             )
         gathered[mask] = table[class_token_index]
     return gathered
+
+
+@torch.no_grad()
+def gather_transition_dynamics(
+    previous_token_index: Tensor,
+    current_token_index: Tensor,
+    agent_type: Tensor,
+    dynamics_veh: Tensor,
+    dynamics_ped: Tensor,
+    dynamics_cyc: Tensor,
+) -> Tensor:
+    """Gather class-specific `(previous, current)` transition rows."""
+
+    if previous_token_index.shape != current_token_index.shape:
+        raise ValueError(
+            "previous_token_index and current_token_index must share a shape"
+        )
+    if previous_token_index.ndim < 1:
+        raise ValueError("token indices must have at least one dimension")
+    if agent_type.shape != previous_token_index.shape[:1]:
+        raise ValueError("agent_type must have shape [n_agent]")
+    integer_types = (
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.uint8,
+    )
+    if (
+        previous_token_index.dtype not in integer_types
+        or current_token_index.dtype not in integer_types
+    ):
+        raise ValueError("token indices must use an integer dtype")
+    if bool(((agent_type < 0) | (agent_type > 2)).any()):
+        raise ValueError("agent_type values must be 0, 1, or 2")
+
+    lookup_tables = (dynamics_veh, dynamics_ped, dynamics_cyc)
+    reference = dynamics_veh
+    for name, table in zip(("veh", "ped", "cyc"), lookup_tables):
+        if (
+            table.ndim != 3
+            or table.shape[0] != table.shape[1]
+            or table.shape[2] != 3
+        ):
+            raise ValueError(
+                f"dynamics_{name} must have shape [n_token, n_token, 3]"
+            )
+        if table.device != reference.device or table.dtype != reference.dtype:
+            raise ValueError(
+                "all transition dynamics tables must share dtype and device"
+            )
+    if (
+        previous_token_index.device != reference.device
+        or current_token_index.device != reference.device
+        or agent_type.device != reference.device
+    ):
+        raise ValueError(
+            "token indices, agent_type, and dynamics tables must share a device"
+        )
+
+    gathered = reference.new_empty((*previous_token_index.shape, 3))
+    for class_index, table in enumerate(lookup_tables):
+        mask = agent_type == class_index
+        previous = previous_token_index[mask].long()
+        current = current_token_index[mask].long()
+        if bool(
+            ((previous < 0) | (previous >= table.shape[0])).any()
+            or ((current < 0) | (current >= table.shape[1])).any()
+        ):
+            raise IndexError(
+                "token index is outside the transition dynamics lookup for "
+                f"agent type {class_index}"
+            )
+        gathered[mask] = table[previous, current]
+    return gathered
