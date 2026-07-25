@@ -1,0 +1,13 @@
+# @package _global_
+
+# Validation with raw-history and causal selected-token dynamics.
+defaults:
+  - inference_history_dynamics
+  - _self_
+
+model:
+  model_config:
+    future_token_dynamics:
+      is_active: true
+    token_processor:
+      agent_token_file: agent_vocab_555_s2.pkl

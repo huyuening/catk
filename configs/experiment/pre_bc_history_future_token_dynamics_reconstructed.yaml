@@ -1,0 +1,10 @@
+# @package _global_
+
+defaults:
+  - pre_bc_history_future_token_dynamics
+  - _self_
+
+model:
+  model_config:
+    token_processor:
+      agent_token_file: agent_vocab_reconstructed.pkl

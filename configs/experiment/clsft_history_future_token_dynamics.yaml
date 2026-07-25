@@ -1,0 +1,13 @@
+# @package _global_
+
+# CAT-32 fine-tuning with raw-history and causal selected-token dynamics.
+defaults:
+  - clsft_history_dynamics
+  - _self_
+
+model:
+  model_config:
+    future_token_dynamics:
+      is_active: true
+    token_processor:
+      agent_token_file: agent_vocab_555_s2.pkl
