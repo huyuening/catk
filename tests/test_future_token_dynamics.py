@@ -590,9 +590,9 @@ class FutureTokenDynamicsTokenProcessorTest(unittest.TestCase):
 class FutureTokenDynamicsConditionerTest(unittest.TestCase):
     @staticmethod
     def _lookups():
-        vehicle = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        pedestrian = vehicle + 10.0
-        cyclist = vehicle + 20.0
+        vehicle = torch.arange(1, 13, dtype=torch.float32).view(2, 2, 3)
+        pedestrian = vehicle + 100.0
+        cyclist = vehicle + 200.0
         return vehicle, pedestrian, cyclist
 
     @staticmethod
@@ -605,9 +605,7 @@ class FutureTokenDynamicsConditionerTest(unittest.TestCase):
         config.update(overrides)
         return config
 
-    def test_open_loop_masks_history_and_uses_own_teacher_forced_token_afterward(
-        self,
-    ):
+    def test_open_loop_uses_previous_current_pair_after_history(self):
         conditioner = FutureTokenDynamicsConditioner(
             hidden_dim=3,
             config=self._active_config(),
@@ -615,18 +613,17 @@ class FutureTokenDynamicsConditionerTest(unittest.TestCase):
         conditioner.embedding = torch.nn.Identity()
         token_index = torch.tensor(
             [
-                [0, 1, 1, 0],
-                [1, 0, 0, 1],
-                [0, 0, 1, 1],
+                [0, 1, 0, 1],
+                [1, 0, 1, 1],
+                [0, 0, 1, 0],
             ]
         )
-        agent_type = torch.tensor([0, 1, 2])
         lookups = self._lookups()
 
         result = conditioner.add_open_loop(
             feature=torch.zeros(3, 4, 3),
             token_index=token_index,
-            agent_type=agent_type,
+            agent_type=torch.tensor([0, 1, 2]),
             dynamics_veh=lookups[0],
             dynamics_ped=lookups[1],
             dynamics_cyc=lookups[2],
@@ -634,14 +631,14 @@ class FutureTokenDynamicsConditionerTest(unittest.TestCase):
         )
 
         self.assertTrue(torch.equal(result[:, :2], torch.zeros(3, 2, 3)))
-        expected_future = torch.tensor(
-            [
-                [[4.0, 5.0, 6.0], [1.0, 2.0, 3.0]],
-                [[11.0, 12.0, 13.0], [14.0, 15.0, 16.0]],
-                [[24.0, 25.0, 26.0], [24.0, 25.0, 26.0]],
-            ]
+        expected = torch.stack(
+            (
+                torch.stack((lookups[0][1, 0], lookups[0][0, 1])),
+                torch.stack((lookups[1][0, 1], lookups[1][1, 1])),
+                torch.stack((lookups[2][0, 1], lookups[2][1, 0])),
+            )
         )
-        self.assertTrue(torch.equal(result[:, 2:], expected_future))
+        torch.testing.assert_close(result[:, 2:], expected)
 
     def test_selected_rollout_token_conditions_only_newly_appended_feature(self):
         conditioner = FutureTokenDynamicsConditioner(
@@ -653,7 +650,8 @@ class FutureTokenDynamicsConditionerTest(unittest.TestCase):
 
         result = conditioner.add_selected(
             feature=torch.zeros(3, 3),
-            token_index=torch.tensor([1, 0, 1]),
+            previous_token_index=torch.tensor([0, 1, 1]),
+            current_token_index=torch.tensor([1, 0, 1]),
             agent_type=torch.tensor([0, 1, 2]),
             dynamics_veh=lookups[0],
             dynamics_ped=lookups[1],
@@ -663,8 +661,8 @@ class FutureTokenDynamicsConditionerTest(unittest.TestCase):
         expected = torch.tensor(
             [
                 [4.0, 5.0, 6.0],
-                [11.0, 12.0, 13.0],
-                [24.0, 25.0, 26.0],
+                [107.0, 108.0, 109.0],
+                [210.0, 211.0, 212.0],
             ]
         )
         self.assertTrue(torch.equal(result, expected))
@@ -682,7 +680,8 @@ class FutureTokenDynamicsConditionerTest(unittest.TestCase):
 
         result = conditioner.add_selected(
             feature=torch.ones(1, 3),
-            token_index=torch.tensor([1]),
+            previous_token_index=torch.tensor([0]),
+            current_token_index=torch.tensor([1]),
             agent_type=torch.tensor([0]),
             dynamics_veh=lookups[0],
             dynamics_ped=lookups[1],
@@ -707,7 +706,8 @@ class FutureTokenDynamicsConditionerTest(unittest.TestCase):
         )
         selected = conditioner.add_selected(
             feature=selected_feature,
-            token_index=torch.zeros(2, dtype=torch.long),
+            previous_token_index=torch.zeros(2, dtype=torch.long),
+            current_token_index=torch.zeros(2, dtype=torch.long),
             agent_type=torch.tensor([0, 1]),
         )
 
@@ -817,16 +817,16 @@ class FutureTokenDynamicsDecoderTest(unittest.TestCase):
 
     @staticmethod
     def _lookups():
-        vehicle = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        pedestrian = vehicle + 10.0
-        cyclist = vehicle + 20.0
+        vehicle = torch.arange(1, 13, dtype=torch.float32).view(2, 2, 3)
+        pedestrian = vehicle + 100.0
+        cyclist = vehicle + 200.0
         return {
             "agent_token_dynamics_veh": vehicle,
             "agent_token_dynamics_ped": pedestrian,
             "agent_token_dynamics_cyc": cyclist,
         }
 
-    def test_teacher_forcing_masks_history_before_adding_own_token_dynamics(self):
+    def test_teacher_forcing_uses_previous_current_pair_after_history(self):
         torch.manual_seed(17)
         disabled = self._decoder({"is_active": False})
         torch.manual_seed(23)
@@ -847,9 +847,9 @@ class FutureTokenDynamicsDecoderTest(unittest.TestCase):
         self.assertTrue(torch.equal(changed[:, :2], reference[:, :2]))
         expected_delta = torch.tensor(
             [
-                [[4.0, 5.0, 6.0], [1.0, 2.0, 3.0]],
-                [[11.0, 12.0, 13.0], [14.0, 15.0, 16.0]],
-                [[24.0, 25.0, 26.0], [24.0, 25.0, 26.0]],
+                [[10.0, 11.0, 12.0], [7.0, 8.0, 9.0]],
+                [[101.0, 102.0, 103.0], [104.0, 105.0, 106.0]],
+                [[204.0, 205.0, 206.0], [210.0, 211.0, 212.0]],
             ]
         )
         self.assertTrue(
@@ -890,8 +890,8 @@ class FutureTokenDynamicsDecoderTest(unittest.TestCase):
             "gt_valid_raw": torch.ones(1, 18, dtype=torch.bool),
             "token_agent_shape": torch.tensor([[2.0, 4.0]]),
             "agent_token_dynamics_veh": vehicle_lookup,
-            "agent_token_dynamics_ped": torch.zeros(2, 3),
-            "agent_token_dynamics_cyc": torch.zeros(2, 3),
+            "agent_token_dynamics_ped": torch.zeros(2, 2, 3),
+            "agent_token_dynamics_cyc": torch.zeros(2, 2, 3),
         }
         map_feature = {
             "position": torch.zeros(1, 2),
@@ -947,10 +947,20 @@ class FutureTokenDynamicsDecoderTest(unittest.TestCase):
             )
         decoder.train()
         baseline_inputs = self._rollout_inputs(
-            torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+            torch.tensor(
+                [
+                    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                    [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                ]
+            )
         )
         changed_inputs = self._rollout_inputs(
-            torch.tensor([[0.0, 0.0, 0.0], [9.0, 0.0, 0.0]])
+            torch.tensor(
+                [
+                    [[0.0, 0.0, 0.0], [9.0, 0.0, 0.0]],
+                    [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                ]
+            )
         )
 
         with patch(

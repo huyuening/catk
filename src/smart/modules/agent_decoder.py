@@ -802,6 +802,7 @@ class SMARTAgentDecoder(nn.Module):
             if use_endpoint_interpolation:
                 interpolation_endpoint_pos.append(pos_a_next)
                 interpolation_endpoint_head.append(head_a_next)
+            previous_token_idx = pred_idx[:, t_now].clone()
             pred_idx[:, n_step] = next_token_idx
 
             # ! update tensors for for next step
@@ -849,7 +850,8 @@ class SMARTAgentDecoder(nn.Module):
             feat_a_next = self.fusion_emb(feat_a_next)
             feat_a_next = self.future_token_dynamics.add_selected(
                 feature=feat_a_next.squeeze(1),
-                token_index=next_token_idx,
+                previous_token_index=previous_token_idx,
+                current_token_index=next_token_idx,
                 agent_type=tokenized_agent["type"],
                 dynamics_veh=tokenized_agent.get("agent_token_dynamics_veh"),
                 dynamics_ped=tokenized_agent.get("agent_token_dynamics_ped"),
