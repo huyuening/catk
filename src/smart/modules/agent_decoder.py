@@ -23,6 +23,9 @@ from src.smart.layers import MLPLayer
 from src.smart.layers.attention_layer import AttentionLayer
 from src.smart.layers.fourier_embedding import FourierEmbedding, MLPEmbedding
 from src.smart.modules.endpoint_interpolation import EndpointInterpolator
+from src.smart.modules.future_token_dynamics import (
+    FutureTokenDynamicsConditioner,
+)
 from src.smart.utils import (
     angle_between_2d_vectors,
     sample_next_token_traj,
@@ -51,6 +54,7 @@ class SMARTAgentDecoder(nn.Module):
         n_token_agent: int,
         endpoint_interpolation: Optional[DictConfig] = None,
         history_dynamics: Optional[DictConfig] = None,
+        future_token_dynamics: Optional[DictConfig] = None,
     ) -> None:
         super(SMARTAgentDecoder, self).__init__()
         self.hidden_dim = hidden_dim
@@ -69,6 +73,10 @@ class SMARTAgentDecoder(nn.Module):
         self.history_dynamics_active = bool(
             history_dynamics is not None
             and history_dynamics.get("is_active", False)
+        )
+        self.future_token_dynamics = FutureTokenDynamicsConditioner(
+            hidden_dim=hidden_dim,
+            config=future_token_dynamics,
         )
 
         input_dim_x_a = 2
@@ -194,6 +202,9 @@ class SMARTAgentDecoder(nn.Module):
         agent_shape,  # [n_agent, 3]
         history_dynamics=None,  # [n_agent, n_history_token, 3]
         history_dynamics_valid=None,  # [n_agent, n_history_token]
+        agent_token_dynamics_veh=None,  # [n_token, 3]
+        agent_token_dynamics_ped=None,  # [n_token, 3]
+        agent_token_dynamics_cyc=None,  # [n_token, 3]
         inference=False,
     ):
         n_agent, n_step, traj_dim = pos_a.shape
@@ -285,6 +296,16 @@ class SMARTAgentDecoder(nn.Module):
             else:
                 history_dynamics_emb = history_dynamics_emb[:, :n_step]
             feat_a = feat_a + self.history_dynamics_gate * history_dynamics_emb
+
+        feat_a = self.future_token_dynamics.add_open_loop(
+            feature=feat_a,
+            token_index=agent_token_index,
+            agent_type=agent_type,
+            dynamics_veh=agent_token_dynamics_veh,
+            dynamics_ped=agent_token_dynamics_ped,
+            dynamics_cyc=agent_token_dynamics_cyc,
+            num_historical_tokens=self.num_historical_steps // self.shift,
+        )
 
         if inference:
             return (
@@ -450,6 +471,15 @@ class SMARTAgentDecoder(nn.Module):
             agent_shape=tokenized_agent["shape"],  # [n_agent, 3]
             history_dynamics=tokenized_agent.get("history_dynamics"),
             history_dynamics_valid=tokenized_agent.get("history_dynamics_valid"),
+            agent_token_dynamics_veh=tokenized_agent.get(
+                "agent_token_dynamics_veh"
+            ),
+            agent_token_dynamics_ped=tokenized_agent.get(
+                "agent_token_dynamics_ped"
+            ),
+            agent_token_dynamics_cyc=tokenized_agent.get(
+                "agent_token_dynamics_cyc"
+            ),
         )  # feat_a: [n_agent, n_step, hidden_dim]
 
         # ! build temporal, interaction and map2agent edges
@@ -569,6 +599,15 @@ class SMARTAgentDecoder(nn.Module):
             agent_shape=tokenized_agent["shape"],
             history_dynamics=tokenized_agent.get("history_dynamics"),
             history_dynamics_valid=tokenized_agent.get("history_dynamics_valid"),
+            agent_token_dynamics_veh=tokenized_agent.get(
+                "agent_token_dynamics_veh"
+            ),
+            agent_token_dynamics_ped=tokenized_agent.get(
+                "agent_token_dynamics_ped"
+            ),
+            agent_token_dynamics_cyc=tokenized_agent.get(
+                "agent_token_dynamics_cyc"
+            ),
             inference=True,
         )
 
@@ -808,6 +847,14 @@ class SMARTAgentDecoder(nn.Module):
             # [n_agent, 1, 2*hidden_dim]
             feat_a_next = torch.cat((agent_token_emb_next, x_a), dim=-1).unsqueeze(1)
             feat_a_next = self.fusion_emb(feat_a_next)
+            feat_a_next = self.future_token_dynamics.add_selected(
+                feature=feat_a_next.squeeze(1),
+                token_index=next_token_idx,
+                agent_type=tokenized_agent["type"],
+                dynamics_veh=tokenized_agent.get("agent_token_dynamics_veh"),
+                dynamics_ped=tokenized_agent.get("agent_token_dynamics_ped"),
+                dynamics_cyc=tokenized_agent.get("agent_token_dynamics_cyc"),
+            ).unsqueeze(1)
             feat_a = torch.cat([feat_a, feat_a_next], dim=1)
 
         if use_endpoint_interpolation:

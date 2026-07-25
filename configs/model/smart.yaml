@@ -22,6 +22,13 @@ model_config:
     # [signed longitudinal acceleration, angular speed, lateral acceleration]
     normalization_scale: [5.0, 1.0, 5.0]
     initial_gate: 1.0
+  # Optional causal dynamics read from the vocabulary token selected at the
+  # preceding autoregressive step. Disabled for legacy CatK checkpoints.
+  future_token_dynamics:
+    is_active: false
+    # [signed longitudinal acceleration, angular speed, lateral acceleration]
+    normalization_scale: [5.0, 1.0, 5.0]
+    initial_gate: 1.0
   token_processor:
     map_token_file: "map_traj_token5.pkl"
     agent_token_file: "agent_vocab_555_s2.pkl"

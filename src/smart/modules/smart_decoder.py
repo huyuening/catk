@@ -42,6 +42,7 @@ class SMARTDecoder(nn.Module):
         n_token_agent: int,
         endpoint_interpolation: Optional[DictConfig] = None,
         history_dynamics: Optional[DictConfig] = None,
+        future_token_dynamics: Optional[DictConfig] = None,
     ) -> None:
         super(SMARTDecoder, self).__init__()
         self.map_encoder = SMARTMapDecoder(
@@ -69,6 +70,7 @@ class SMARTDecoder(nn.Module):
             n_token_agent=n_token_agent,
             endpoint_interpolation=endpoint_interpolation,
             history_dynamics=history_dynamics,
+            future_token_dynamics=future_token_dynamics,
         )
 
     def forward(

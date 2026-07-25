@@ -48,15 +48,21 @@ class SMART(LightningModule):
         self.val_open_loop = model_config.val_open_loop
         self.val_closed_loop = model_config.val_closed_loop
         history_dynamics = model_config.get("history_dynamics", None)
+        future_token_dynamics = model_config.get(
+            "future_token_dynamics",
+            None,
+        )
         self.token_processor = TokenProcessor(
             **model_config.token_processor,
             history_dynamics=history_dynamics,
+            future_token_dynamics=future_token_dynamics,
         )
 
         self.encoder = SMARTDecoder(
             **model_config.decoder,
             n_token_agent=self.token_processor.n_token_agent,
             history_dynamics=history_dynamics,
+            future_token_dynamics=future_token_dynamics,
         )
         set_model_for_finetuning(self.encoder, model_config.finetune)
 

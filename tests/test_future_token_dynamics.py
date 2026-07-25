@@ -7,6 +7,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -21,19 +22,50 @@ from src.smart.tokens.future_token_dynamics import (
 
 
 def _load_token_processor():
-    if importlib.util.find_spec("omegaconf") is None:
+    if (
+        "omegaconf" not in sys.modules
+        and importlib.util.find_spec("omegaconf") is None
+    ):
         omegaconf_stub = types.ModuleType("omegaconf")
         omegaconf_stub.DictConfig = dict
         sys.modules["omegaconf"] = omegaconf_stub
 
-    if importlib.util.find_spec("torch_geometric") is None:
+    if (
+        "torch_geometric" not in sys.modules
+        and importlib.util.find_spec("torch_geometric") is None
+    ):
         torch_geometric_stub = types.ModuleType("torch_geometric")
         torch_geometric_stub.__path__ = []
         torch_geometric_data_stub = types.ModuleType("torch_geometric.data")
         torch_geometric_data_stub.HeteroData = dict
+        torch_geometric_nn_stub = types.ModuleType("torch_geometric.nn")
+        torch_geometric_nn_stub.__path__ = []
+        torch_geometric_conv_stub = types.ModuleType("torch_geometric.nn.conv")
+
+        class MessagePassing(torch.nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+
+        torch_geometric_conv_stub.MessagePassing = MessagePassing
+        torch_geometric_utils_stub = types.ModuleType("torch_geometric.utils")
+        torch_geometric_utils_stub.softmax = lambda value, *args, **kwargs: value
+        torch_geometric_utils_stub.dense_to_sparse = (
+            lambda value, *args, **kwargs: (
+                value.nonzero().T,
+                value[value != 0],
+            )
+        )
+        torch_geometric_utils_stub.subgraph = (
+            lambda subset, edge_index, *args, **kwargs: edge_index
+        )
         torch_geometric_stub.data = torch_geometric_data_stub
+        torch_geometric_stub.nn = torch_geometric_nn_stub
+        torch_geometric_stub.utils = torch_geometric_utils_stub
         sys.modules["torch_geometric"] = torch_geometric_stub
         sys.modules["torch_geometric.data"] = torch_geometric_data_stub
+        sys.modules["torch_geometric.nn"] = torch_geometric_nn_stub
+        sys.modules["torch_geometric.nn.conv"] = torch_geometric_conv_stub
+        sys.modules["torch_geometric.utils"] = torch_geometric_utils_stub
 
     from src.smart.tokens.token_processor import TokenProcessor
 
@@ -41,6 +73,32 @@ def _load_token_processor():
 
 
 TokenProcessor = _load_token_processor()
+
+from src.smart.modules.future_token_dynamics import (
+    FutureTokenDynamicsConditioner,
+)
+
+
+def _load_agent_decoder():
+    if (
+        "torch_cluster" not in sys.modules
+        and importlib.util.find_spec("torch_cluster") is None
+    ):
+        torch_cluster_stub = types.ModuleType("torch_cluster")
+
+        def unavailable(*args, **kwargs):
+            raise AssertionError("graph radius function was not replaced in the test")
+
+        torch_cluster_stub.radius = unavailable
+        torch_cluster_stub.radius_graph = unavailable
+        sys.modules["torch_cluster"] = torch_cluster_stub
+
+    from src.smart.modules.agent_decoder import SMARTAgentDecoder
+
+    return SMARTAgentDecoder
+
+
+SMARTAgentDecoder = _load_agent_decoder()
 
 
 class FutureTokenDynamicsLookupTest(unittest.TestCase):
@@ -400,6 +458,399 @@ class FutureTokenDynamicsTokenProcessorTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "same token count"):
                 processor.init_agent_token(str(path))
+
+
+class FutureTokenDynamicsConditionerTest(unittest.TestCase):
+    @staticmethod
+    def _lookups():
+        vehicle = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        pedestrian = vehicle + 10.0
+        cyclist = vehicle + 20.0
+        return vehicle, pedestrian, cyclist
+
+    @staticmethod
+    def _active_config(**overrides):
+        config = {
+            "is_active": True,
+            "normalization_scale": [1.0, 1.0, 1.0],
+            "initial_gate": 1.0,
+        }
+        config.update(overrides)
+        return config
+
+    def test_open_loop_masks_history_and_uses_own_teacher_forced_token_afterward(
+        self,
+    ):
+        conditioner = FutureTokenDynamicsConditioner(
+            hidden_dim=3,
+            config=self._active_config(),
+        )
+        conditioner.embedding = torch.nn.Identity()
+        token_index = torch.tensor(
+            [
+                [0, 1, 1, 0],
+                [1, 0, 0, 1],
+                [0, 0, 1, 1],
+            ]
+        )
+        agent_type = torch.tensor([0, 1, 2])
+        lookups = self._lookups()
+
+        result = conditioner.add_open_loop(
+            feature=torch.zeros(3, 4, 3),
+            token_index=token_index,
+            agent_type=agent_type,
+            dynamics_veh=lookups[0],
+            dynamics_ped=lookups[1],
+            dynamics_cyc=lookups[2],
+            num_historical_tokens=2,
+        )
+
+        self.assertTrue(torch.equal(result[:, :2], torch.zeros(3, 2, 3)))
+        expected_future = torch.tensor(
+            [
+                [[4.0, 5.0, 6.0], [1.0, 2.0, 3.0]],
+                [[11.0, 12.0, 13.0], [14.0, 15.0, 16.0]],
+                [[24.0, 25.0, 26.0], [24.0, 25.0, 26.0]],
+            ]
+        )
+        self.assertTrue(torch.equal(result[:, 2:], expected_future))
+
+    def test_selected_rollout_token_conditions_only_newly_appended_feature(self):
+        conditioner = FutureTokenDynamicsConditioner(
+            hidden_dim=3,
+            config=self._active_config(),
+        )
+        conditioner.embedding = torch.nn.Identity()
+        lookups = self._lookups()
+
+        result = conditioner.add_selected(
+            feature=torch.zeros(3, 3),
+            token_index=torch.tensor([1, 0, 1]),
+            agent_type=torch.tensor([0, 1, 2]),
+            dynamics_veh=lookups[0],
+            dynamics_ped=lookups[1],
+            dynamics_cyc=lookups[2],
+        )
+
+        expected = torch.tensor(
+            [
+                [4.0, 5.0, 6.0],
+                [11.0, 12.0, 13.0],
+                [24.0, 25.0, 26.0],
+            ]
+        )
+        self.assertTrue(torch.equal(result, expected))
+
+    def test_normalization_and_gate_scale_the_added_feature(self):
+        conditioner = FutureTokenDynamicsConditioner(
+            hidden_dim=3,
+            config=self._active_config(
+                normalization_scale=[2.0, 4.0, 5.0],
+                initial_gate=0.5,
+            ),
+        )
+        conditioner.embedding = torch.nn.Identity()
+        lookups = self._lookups()
+
+        result = conditioner.add_selected(
+            feature=torch.ones(1, 3),
+            token_index=torch.tensor([1]),
+            agent_type=torch.tensor([0]),
+            dynamics_veh=lookups[0],
+            dynamics_ped=lookups[1],
+            dynamics_cyc=lookups[2],
+        )
+
+        expected = torch.tensor([[2.0, 1.625, 1.6]])
+        self.assertTrue(torch.allclose(result, expected))
+
+    def test_inactive_conditioner_is_exact_no_op_without_checkpoint_keys(self):
+        conditioner = FutureTokenDynamicsConditioner(
+            hidden_dim=8,
+            config={"is_active": False},
+        )
+        feature = torch.randn(2, 4, 8)
+        selected_feature = feature[:, 0]
+
+        open_loop = conditioner.add_open_loop(
+            feature=feature,
+            token_index=torch.zeros(2, 4, dtype=torch.long),
+            agent_type=torch.tensor([0, 1]),
+        )
+        selected = conditioner.add_selected(
+            feature=selected_feature,
+            token_index=torch.zeros(2, dtype=torch.long),
+            agent_type=torch.tensor([0, 1]),
+        )
+
+        self.assertIs(open_loop, feature)
+        self.assertIs(selected, selected_feature)
+        self.assertEqual(conditioner.state_dict(), {})
+
+    def test_active_state_has_embedding_and_gate_but_not_normalization_buffer(self):
+        conditioner = FutureTokenDynamicsConditioner(
+            hidden_dim=8,
+            config=self._active_config(),
+        )
+
+        state_keys = set(conditioner.state_dict())
+
+        self.assertIn("gate", state_keys)
+        self.assertTrue(any(key.startswith("embedding.") for key in state_keys))
+        self.assertNotIn("normalization_scale", state_keys)
+
+    def test_invalid_normalization_scale_is_rejected(self):
+        for scale in ([1.0, 2.0], [1.0, 0.0, 1.0]):
+            with self.subTest(scale=scale):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "future_token_dynamics.normalization_scale",
+                ):
+                    FutureTokenDynamicsConditioner(
+                        hidden_dim=8,
+                        config=self._active_config(normalization_scale=scale),
+                    )
+
+    def test_active_conditioner_requires_all_lookup_tables(self):
+        conditioner = FutureTokenDynamicsConditioner(
+            hidden_dim=3,
+            config=self._active_config(),
+        )
+
+        with self.assertRaisesRegex(KeyError, "agent_token_dynamics"):
+            conditioner.add_open_loop(
+                feature=torch.zeros(1, 3, 3),
+                token_index=torch.zeros(1, 3, dtype=torch.long),
+                agent_type=torch.zeros(1, dtype=torch.long),
+            )
+
+
+class FutureTokenDynamicsDecoderTest(unittest.TestCase):
+    class _TemporalIdentity(torch.nn.Module):
+        def forward(self, feature, *args):
+            if isinstance(feature, tuple):
+                return feature[1]
+            return feature
+
+    class _BipartiteIdentity(torch.nn.Module):
+        def forward(self, feature, *args):
+            if isinstance(feature, tuple):
+                return feature[1]
+            return feature
+
+    @staticmethod
+    def _decoder(future_config, *, num_future_steps=10):
+        return SMARTAgentDecoder(
+            hidden_dim=3,
+            num_historical_steps=11,
+            num_future_steps=num_future_steps,
+            time_span=30,
+            pl2a_radius=30.0,
+            a2a_radius=60.0,
+            num_freq_bands=2,
+            num_layers=1,
+            num_heads=1,
+            head_dim=3,
+            dropout=0.0,
+            hist_drop_prob=0.0,
+            n_token_agent=2,
+            endpoint_interpolation={"is_active": False},
+            history_dynamics={"is_active": False},
+            future_token_dynamics=future_config,
+        )
+
+    @staticmethod
+    def _embedding_inputs():
+        n_agent, n_step, n_token = 3, 4, 2
+        position = torch.zeros(n_agent, n_step, 2)
+        position[:, :, 0] = torch.arange(n_step, dtype=torch.float32)
+        heading_vector = torch.zeros(n_agent, n_step, 2)
+        heading_vector[..., 0] = 1.0
+        trajectory = torch.arange(n_token * 8, dtype=torch.float32).view(
+            n_token,
+            8,
+        )
+        return {
+            "agent_token_index": torch.tensor(
+                [
+                    [0, 1, 1, 0],
+                    [1, 0, 0, 1],
+                    [0, 0, 1, 1],
+                ]
+            ),
+            "trajectory_token_veh": trajectory,
+            "trajectory_token_ped": trajectory + 20.0,
+            "trajectory_token_cyc": trajectory + 40.0,
+            "pos_a": position,
+            "head_vector_a": heading_vector,
+            "agent_type": torch.tensor([0, 1, 2]),
+            "agent_shape": torch.ones(n_agent, 3),
+        }
+
+    @staticmethod
+    def _lookups():
+        vehicle = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        pedestrian = vehicle + 10.0
+        cyclist = vehicle + 20.0
+        return {
+            "agent_token_dynamics_veh": vehicle,
+            "agent_token_dynamics_ped": pedestrian,
+            "agent_token_dynamics_cyc": cyclist,
+        }
+
+    def test_teacher_forcing_masks_history_before_adding_own_token_dynamics(self):
+        torch.manual_seed(17)
+        disabled = self._decoder({"is_active": False})
+        torch.manual_seed(23)
+        active = self._decoder(
+            {
+                "is_active": True,
+                "normalization_scale": [1.0, 1.0, 1.0],
+                "initial_gate": 1.0,
+            }
+        )
+        active.load_state_dict(disabled.state_dict(), strict=False)
+        active.future_token_dynamics.embedding = torch.nn.Identity()
+        inputs = self._embedding_inputs()
+
+        reference = disabled.agent_token_embedding(**inputs)
+        changed = active.agent_token_embedding(**inputs, **self._lookups())
+
+        self.assertTrue(torch.equal(changed[:, :2], reference[:, :2]))
+        expected_delta = torch.tensor(
+            [
+                [[4.0, 5.0, 6.0], [1.0, 2.0, 3.0]],
+                [[11.0, 12.0, 13.0], [14.0, 15.0, 16.0]],
+                [[24.0, 25.0, 26.0], [24.0, 25.0, 26.0]],
+            ]
+        )
+        self.assertTrue(
+            torch.allclose(
+                changed[:, 2:] - reference[:, 2:],
+                expected_delta,
+            )
+        )
+
+    @classmethod
+    def _rollout_inputs(cls, vehicle_lookup):
+        time = torch.arange(6, dtype=torch.float32) * 0.1
+        token_zero = FutureTokenDynamicsLookupTest._contours(
+            torch.stack((time, torch.zeros_like(time)), dim=-1),
+            torch.zeros_like(time),
+        )
+        token_one = FutureTokenDynamicsLookupTest._contours(
+            torch.stack((2.0 * time, torch.zeros_like(time)), dim=-1),
+            torch.zeros_like(time),
+        )
+        token_all = torch.stack((token_zero, token_one), dim=0)
+        tokenized_agent = {
+            "valid_mask": torch.ones(1, 18, dtype=torch.bool),
+            "gt_pos": torch.zeros(1, 18, 2),
+            "gt_heading": torch.zeros(1, 18),
+            "gt_idx": torch.zeros(1, 18, dtype=torch.long),
+            "trajectory_token_veh": token_all[:, -1].flatten(1, 2),
+            "trajectory_token_ped": token_all[:, -1].flatten(1, 2),
+            "trajectory_token_cyc": token_all[:, -1].flatten(1, 2),
+            "token_traj": token_all[:, -1].unsqueeze(0),
+            "token_traj_all": token_all.unsqueeze(0),
+            "type": torch.zeros(1, dtype=torch.long),
+            "shape": torch.ones(1, 3),
+            "batch": torch.zeros(1, dtype=torch.long),
+            "num_graphs": 1,
+            "gt_pos_raw": torch.zeros(1, 18, 2),
+            "gt_head_raw": torch.zeros(1, 18),
+            "gt_valid_raw": torch.ones(1, 18, dtype=torch.bool),
+            "token_agent_shape": torch.tensor([[2.0, 4.0]]),
+            "agent_token_dynamics_veh": vehicle_lookup,
+            "agent_token_dynamics_ped": torch.zeros(2, 3),
+            "agent_token_dynamics_cyc": torch.zeros(2, 3),
+        }
+        map_feature = {
+            "position": torch.zeros(1, 2),
+            "orientation": torch.zeros(1),
+            "batch": torch.zeros(1, dtype=torch.long),
+            "pt_token": torch.zeros(1, 3),
+        }
+        return tokenized_agent, map_feature
+
+    @staticmethod
+    def _fixed_sample(**kwargs):
+        token_index = torch.ones(
+            kwargs["pos_now"].shape[0],
+            dtype=torch.long,
+            device=kwargs["pos_now"].device,
+        )
+        agent_index = torch.arange(
+            token_index.shape[0],
+            device=token_index.device,
+        )
+        trajectory = kwargs["token_traj_all"][agent_index, token_index]
+        return token_index, trajectory
+
+    def test_rollout_lookup_cannot_change_first_logits_but_changes_next_logits(self):
+        decoder = self._decoder(
+            {
+                "is_active": True,
+                "normalization_scale": [1.0, 1.0, 1.0],
+                "initial_gate": 1.0,
+            },
+            num_future_steps=10,
+        )
+        decoder.future_token_dynamics.embedding = torch.nn.Identity()
+        decoder.t_attn_layers = torch.nn.ModuleList([self._TemporalIdentity()])
+        decoder.pt2a_attn_layers = torch.nn.ModuleList([self._BipartiteIdentity()])
+        decoder.a2a_attn_layers = torch.nn.ModuleList([self._TemporalIdentity()])
+        decoder.build_temporal_edge = lambda **kwargs: (
+            torch.empty(2, 0, dtype=torch.long),
+            torch.empty(0, 3),
+        )
+        decoder.build_map2agent_edge = lambda **kwargs: (
+            torch.empty(2, 0, dtype=torch.long),
+            torch.empty(0, 3),
+        )
+        decoder.build_interaction_edge = lambda **kwargs: (
+            torch.empty(2, 0, dtype=torch.long),
+            torch.empty(0, 3),
+        )
+        decoder.token_predict_head = torch.nn.Linear(3, 2, bias=False)
+        with torch.no_grad():
+            decoder.token_predict_head.weight.copy_(
+                torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+            )
+        decoder.train()
+        baseline_inputs = self._rollout_inputs(
+            torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        )
+        changed_inputs = self._rollout_inputs(
+            torch.tensor([[0.0, 0.0, 0.0], [9.0, 0.0, 0.0]])
+        )
+
+        with patch(
+            "src.smart.modules.agent_decoder.sample_next_token_traj",
+            side_effect=self._fixed_sample,
+        ):
+            baseline = decoder.inference(
+                *baseline_inputs,
+                sampling_scheme=SimpleNamespace(),
+            )
+            changed = decoder.inference(
+                *changed_inputs,
+                sampling_scheme=SimpleNamespace(),
+            )
+
+        self.assertTrue(
+            torch.equal(
+                baseline["next_token_logits"][:, 0],
+                changed["next_token_logits"][:, 0],
+            )
+        )
+        self.assertFalse(
+            torch.equal(
+                baseline["next_token_logits"][:, 1],
+                changed["next_token_logits"][:, 1],
+            )
+        )
 
 
 if __name__ == "__main__":
