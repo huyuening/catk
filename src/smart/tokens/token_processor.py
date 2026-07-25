@@ -21,6 +21,9 @@ from torch import Tensor
 from torch.distributions import Categorical
 from torch_geometric.data import HeteroData
 
+from src.smart.tokens.future_token_dynamics import (
+    build_future_token_dynamics_lookup,
+)
 from src.smart.utils import (
     cal_polygon_contour,
     transform_to_global,
@@ -38,6 +41,7 @@ class TokenProcessor(torch.nn.Module):
         map_token_sampling: DictConfig,
         agent_token_sampling: DictConfig,
         history_dynamics: Optional[DictConfig] = None,
+        future_token_dynamics: Optional[DictConfig] = None,
     ) -> None:
         super(TokenProcessor, self).__init__()
         self.map_token_sampling = map_token_sampling
@@ -46,6 +50,10 @@ class TokenProcessor(torch.nn.Module):
         self.history_dynamics_active = bool(
             history_dynamics is not None
             and history_dynamics.get("is_active", False)
+        )
+        self.future_token_dynamics_active = bool(
+            future_token_dynamics is not None
+            and future_token_dynamics.get("is_active", False)
         )
         self.shift = 5
 
@@ -79,11 +87,47 @@ class TokenProcessor(torch.nn.Module):
         )  # [1, n_token, 3, 2]
 
     def init_agent_token(self, agent_token_path) -> None:
-        agent_token_data = pickle.load(open(agent_token_path, "rb"))
-        for k, v in agent_token_data["token_all"].items():
+        with open(agent_token_path, "rb") as file:
+            agent_token_data = pickle.load(file)
+        if not isinstance(agent_token_data, dict) or not isinstance(
+            agent_token_data.get("token_all"), dict
+        ):
+            raise ValueError(
+                f"{agent_token_path}: expected a token_all dictionary"
+            )
+
+        token_all = agent_token_data["token_all"]
+        agent_classes = ("veh", "ped", "cyc")
+        missing_classes = [key for key in agent_classes if key not in token_all]
+        if missing_classes:
+            raise ValueError(
+                f"{agent_token_path}: token_all is missing classes "
+                f"{missing_classes}"
+            )
+
+        token_counts = {}
+        for k in agent_classes:
+            v = token_all[k]
             v = torch.tensor(v, dtype=torch.float32)
             # [n_token, 6, 4, 2], countour, 10 hz
             self.register_buffer(f"agent_token_all_{k}", v, persistent=False)
+            token_counts[k] = int(v.shape[0]) if v.ndim > 0 else 0
+            if self.future_token_dynamics_active:
+                dynamics = build_future_token_dynamics_lookup(
+                    v,
+                    context=f"{agent_token_path} class {k}",
+                )
+                self.register_buffer(
+                    f"agent_token_dynamics_{k}",
+                    dynamics,
+                    persistent=False,
+                )
+
+        if len(set(token_counts.values())) != 1:
+            raise ValueError(
+                f"{agent_token_path}: veh, ped, and cyc must have the same "
+                f"token count, got {token_counts}"
+            )
 
     def tokenize_map(self, data: HeteroData) -> Dict[str, Tensor]:
         traj_pos = data["map_save"]["traj_pos"]  # [n_pl, 3, 2]
@@ -194,6 +238,11 @@ class TokenProcessor(torch.nn.Module):
             tokenized_agent[f"trajectory_token_{k}"] = getattr(
                 self, f"agent_token_all_{k}"
             )[:, -1].flatten(1, 2)
+            if self.future_token_dynamics_active:
+                tokenized_agent[f"agent_token_dynamics_{k}"] = getattr(
+                    self,
+                    f"agent_token_dynamics_{k}",
+                )
 
         # ! match token for each agent
         if not self.training:
