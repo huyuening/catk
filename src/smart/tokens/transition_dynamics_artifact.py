@@ -30,7 +30,8 @@ from torch import Tensor
 
 FORMAT_VERSION = 1
 FEATURE_ORDER = ("a_lon", "angular_speed", "a_lat")
-VALID_SOURCES = ("raw", "reconstructed")
+HYBRID_SOURCE = "raw_tokens_reconstructed_dynamics"
+VALID_SOURCES = ("raw", "reconstructed", HYBRID_SOURCE)
 
 
 def vocabulary_sha256(path: str | Path) -> str:

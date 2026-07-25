@@ -25,6 +25,11 @@ except (ImportError, ModuleNotFoundError):
     make_transition_dynamics_artifact = None
     save_transition_dynamics_artifact = None
 
+try:
+    from src.smart.tokens.transition_dynamics_artifact import HYBRID_SOURCE
+except (ImportError, ModuleNotFoundError):
+    HYBRID_SOURCE = None
+
 
 class FullTrajectoryDynamicsTest(unittest.TestCase):
     def test_complete_constant_acceleration_trajectory(self):
@@ -371,6 +376,49 @@ class TransitionDynamicsArtifactTest(unittest.TestCase):
             )
             self.assertEqual(loaded.dtype, torch.float16)
             self.assertFalse((root / "lookup.pt.tmp").exists())
+
+    def test_hybrid_source_round_trip_is_explicit(self):
+        self.assertIsNotNone(
+            HYBRID_SOURCE,
+            "hybrid transition-dynamics provenance is not implemented",
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vocabulary = root / "agent_vocab.pkl"
+            vocabulary.write_bytes(b"original-vocabulary")
+            artifact = make_transition_dynamics_artifact(
+                np.zeros((3, 2, 2, 3), dtype=np.float16),
+                vocabulary_path=vocabulary,
+                source=HYBRID_SOURCE,
+                dt=0.1,
+                clipping_limits=(15.0, 3.0, 15.0),
+                shrinkage_count=8.0,
+                statistics={
+                    "assignment_source": "raw",
+                    "dynamics_source": "reconstructed",
+                },
+            )
+            output = save_transition_dynamics_artifact(
+                root / "hybrid.pt",
+                artifact,
+                vocabulary_path=vocabulary,
+            )
+
+            loaded = load_transition_dynamics_artifact(
+                output,
+                vocabulary_path=vocabulary,
+                expected_source=HYBRID_SOURCE,
+                expected_n_token=2,
+            )
+
+            self.assertEqual(tuple(loaded.shape), (3, 2, 2, 3))
+            with self.assertRaisesRegex(ValueError, "source"):
+                load_transition_dynamics_artifact(
+                    output,
+                    vocabulary_path=vocabulary,
+                    expected_source="raw",
+                    expected_n_token=2,
+                )
 
     def test_load_rejects_missing_numeric_metadata(self):
         self.assertIsNotNone(make_transition_dynamics_artifact)

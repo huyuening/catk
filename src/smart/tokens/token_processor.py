@@ -145,7 +145,8 @@ class TokenProcessor(torch.nn.Module):
             source = config.get("source", "raw")
             if source not in TRANSITION_DYNAMICS_SOURCES:
                 raise ValueError(
-                    "future_token_dynamics.source must be raw or reconstructed"
+                    "future_token_dynamics.source must be one of "
+                    f"{TRANSITION_DYNAMICS_SOURCES}"
                 )
             lookup_path = str(lookup_file)
             if not os.path.isabs(lookup_path):
