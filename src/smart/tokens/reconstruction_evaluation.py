@@ -202,6 +202,40 @@ class RunningMoments:
             "maximum": self.maximum if self.count else None,
         }
 
+    def summary(
+        self,
+        *,
+        p01: float | None,
+        p99: float | None,
+    ) -> dict:
+        if self.count == 0:
+            return {
+                "count": 0,
+                "mean": None,
+                "std": None,
+                "min": None,
+                "max": None,
+                "range": None,
+                "p01": None,
+                "p99": None,
+                "p99_minus_p01": None,
+            }
+        return {
+            "count": self.count,
+            "mean": self.mean,
+            "std": self.std,
+            "min": self.minimum,
+            "max": self.maximum,
+            "range": self.maximum - self.minimum,
+            "p01": p01,
+            "p99": p99,
+            "p99_minus_p01": (
+                p99 - p01
+                if p01 is not None and p99 is not None
+                else None
+            ),
+        }
+
     @classmethod
     def from_state(cls, state: Mapping) -> "RunningMoments":
         count = int(state["count"])

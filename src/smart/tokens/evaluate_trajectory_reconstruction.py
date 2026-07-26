@@ -15,16 +15,21 @@
 
 from __future__ import annotations
 
+import argparse
+import csv
 import dataclasses
 import importlib
 import json
 import math
 import os
 import re
+import shutil
 import struct
 import sys
-from collections import deque
+from collections import Counter, deque
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
@@ -34,8 +39,22 @@ os.environ.setdefault(
 )
 
 from .reconstruction_evaluation import (
+    AGENT_METRICS,
+    FRAME_METRICS,
+    EvaluationAccumulator,
+    MetricDefinition,
+    RunningMoments,
     ScenarioMetricBatch,
     evaluate_scenario_pair,
+)
+from .exact_metric_store import (
+    BufferKey,
+    EvaluationCheckpoint,
+    EvaluationIdentity,
+    ExactMetricStore,
+    ExactPercentiles,
+    restore_checkpoint,
+    write_checkpoint,
 )
 from .trajectory_filter_reconstructor import FILTER_STRENGTHS
 from .womd_trajectory_reconstruction import (
@@ -48,6 +67,31 @@ _TRAINING_SHARD_PATTERN = re.compile(
     r"^training\.tfrecord-(?P<index>\d{5})-of-(?P<total>\d{5})$"
 )
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_METRIC_SCHEMA = "exact-reconstruction-v1"
+_SCRATCH_MARKER = ".catk_exact_reconstruction_scratch"
+_FINAL_OUTPUT_NAMES = (
+    "agent_summary.csv",
+    "frame_jerk_summary.csv",
+    "summary.json",
+    "reconstruction_summary.json",
+    "run_config.json",
+)
+_SUMMARY_FIELDS = (
+    "scope",
+    "level",
+    "metric",
+    "variant",
+    "unit",
+    "count",
+    "mean",
+    "std",
+    "min",
+    "max",
+    "range",
+    "p01",
+    "p99",
+    "p99_minus_p01",
+)
 
 
 @dataclass(frozen=True)
@@ -405,3 +449,803 @@ def bounded_ordered_map(
         except StopIteration:
             continue
         pending.append(executor.submit(function, item))
+
+
+def _metric_definitions(
+    level: str,
+) -> tuple[MetricDefinition, ...]:
+    if level == "agent":
+        return AGENT_METRICS
+    if level == "frame":
+        return FRAME_METRICS
+    raise ValueError("summary level must be 'agent' or 'frame'")
+
+
+def _moment_groups(
+    accumulator: EvaluationAccumulator,
+    level: str,
+) -> dict[str, dict[str, RunningMoments]]:
+    if level == "agent":
+        return accumulator.agent_moments
+    if level == "frame":
+        return accumulator.frame_moments
+    raise ValueError("summary level must be 'agent' or 'frame'")
+
+
+def _evaluation_scopes(
+    accumulator: EvaluationAccumulator,
+) -> list[str]:
+    types = (
+        set(accumulator.agent_moments)
+        | set(accumulator.frame_moments)
+    ) - {"all"}
+    return ["all", *sorted(types)]
+
+
+def collect_exact_percentiles(
+    accumulator: EvaluationAccumulator,
+    store: ExactMetricStore,
+) -> dict[tuple[str, str, str], ExactPercentiles]:
+    """Finalize exact type/all percentiles and verify every sample count."""
+
+    store.flush_and_sync()
+    counts = store.snapshot_counts()
+    scopes = _evaluation_scopes(accumulator)
+    type_scopes = scopes[1:]
+    result: dict[
+        tuple[str, str, str],
+        ExactPercentiles,
+    ] = {}
+    for level in ("agent", "frame"):
+        grouped = _moment_groups(accumulator, level)
+        for definition in _metric_definitions(level):
+            type_count = 0
+            for scope in type_scopes:
+                key = BufferKey(level, scope, definition.key)
+                expected_count = counts.get(key.encoded, 0)
+                actual_count = grouped.get(scope, {}).get(
+                    definition.key,
+                    RunningMoments(),
+                ).count
+                if actual_count != expected_count:
+                    raise ValueError(
+                        "metric moment/buffer count mismatch for "
+                        f"{key.encoded}: {actual_count} != "
+                        f"{expected_count}"
+                    )
+                type_count += expected_count
+                result[(level, scope, definition.key)] = (
+                    store.percentiles(key)
+                )
+
+            all_count = grouped.get("all", {}).get(
+                definition.key,
+                RunningMoments(),
+            ).count
+            if all_count != type_count:
+                raise ValueError(
+                    "global metric count does not equal type counts for "
+                    f"{level}|all|{definition.key}: "
+                    f"{all_count} != {type_count}"
+                )
+            result[(level, "all", definition.key)] = (
+                store.combined_percentiles(
+                    level,
+                    definition.key,
+                    type_scopes,
+                )
+            )
+    return result
+
+
+def summary_rows(
+    accumulator: EvaluationAccumulator,
+    percentiles: Mapping[
+        tuple[str, str, str],
+        ExactPercentiles,
+    ],
+    level: str,
+) -> list[dict]:
+    """Build stable all/type summary rows for one metric level."""
+
+    definitions = _metric_definitions(level)
+    grouped = _moment_groups(accumulator, level)
+    rows = []
+    for scope in _evaluation_scopes(accumulator):
+        for definition in definitions:
+            moments = grouped.get(scope, {}).get(
+                definition.key,
+                RunningMoments(),
+            )
+            exact = percentiles.get(
+                (level, scope, definition.key),
+                ExactPercentiles(None, None),
+            )
+            rows.append(
+                {
+                    "scope": scope,
+                    "level": level,
+                    "metric": definition.metric,
+                    "variant": definition.variant,
+                    "unit": definition.unit,
+                    **moments.summary(
+                        p01=exact.p01,
+                        p99=exact.p99,
+                    ),
+                }
+            )
+    return rows
+
+
+def _atomic_json(
+    path: Path,
+    value: object,
+) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(
+                value,
+                stream,
+                allow_nan=False,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_csv(
+    path: Path,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with temporary.open(
+            "w",
+            encoding="utf-8",
+            newline="",
+        ) as stream:
+            writer = csv.DictWriter(
+                stream,
+                fieldnames=_SUMMARY_FIELDS,
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _reconstruction_summary(
+    counts: Mapping[str, int],
+) -> dict:
+    normalized = {
+        str(key): int(value)
+        for key, value in sorted(counts.items())
+    }
+    rates = {}
+    total_tracks = normalized.get("total_tracks", 0)
+    processed_segments = normalized.get("processed_segments", 0)
+    for key, value in normalized.items():
+        if key != "total_tracks" and key.endswith("_tracks"):
+            rates[f"{key}_per_total_track"] = (
+                value / total_tracks
+                if total_tracks
+                else None
+            )
+        elif (
+            key != "processed_segments"
+            and key.endswith("_segments")
+        ):
+            rates[f"{key}_per_processed_segment"] = (
+                value / processed_segments
+                if processed_segments
+                else None
+            )
+    return {
+        "counts": normalized,
+        "rates": rates,
+    }
+
+
+def _reject_unknown_output_entries(
+    output_dir: Path,
+) -> None:
+    if not output_dir.exists():
+        return
+    unknown = sorted(
+        path.name
+        for path in output_dir.iterdir()
+        if path.name not in _FINAL_OUTPUT_NAMES
+    )
+    if unknown:
+        raise ValueError(
+            f"output directory contains unknown entries: {unknown}"
+        )
+
+
+def write_final_outputs(
+    *,
+    output_dir: Path,
+    accumulator: EvaluationAccumulator,
+    store: ExactMetricStore,
+    reconstruction_counts: Mapping[str, int],
+    run_config: Mapping[str, object],
+) -> tuple[Path, ...]:
+    """Finalize exact statistics and atomically write the five outputs."""
+
+    output_dir = Path(output_dir)
+    _reject_unknown_output_entries(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    percentiles = collect_exact_percentiles(
+        accumulator,
+        store,
+    )
+    agent_rows = summary_rows(
+        accumulator,
+        percentiles,
+        "agent",
+    )
+    frame_rows = summary_rows(
+        accumulator,
+        percentiles,
+        "frame",
+    )
+    reconstruction = _reconstruction_summary(
+        reconstruction_counts
+    )
+    summary = {
+        "schema": "exact-reconstruction-v1",
+        "scenario_count": accumulator.scenarios,
+        "agent_count": accumulator.agents,
+        "statistics": {
+            "dtype": "float64",
+            "standard_deviation": "population (ddof=0)",
+            "percentiles": {
+                "method": "NumPy linear",
+                "values": [1, 99],
+                "exact": True,
+            },
+        },
+        "support": {
+            "matched": (
+                "raw jerk samples are reported only when every raw-valid "
+                "jerk center is also valid after reconstruction"
+            ),
+            "reconstructed_full": (
+                "all finite reconstructed-valid jerk centers"
+            ),
+            "xy_rmse": (
+                "frames where both raw and reconstructed positions are valid"
+            ),
+        },
+        "agent_metrics": agent_rows,
+        "frame_metrics": frame_rows,
+    }
+
+    paths = tuple(
+        output_dir / name
+        for name in _FINAL_OUTPUT_NAMES
+    )
+    _atomic_csv(paths[0], agent_rows)
+    _atomic_csv(paths[1], frame_rows)
+    _atomic_json(paths[2], summary)
+    _atomic_json(paths[3], reconstruction)
+    _atomic_json(paths[4], dict(run_config))
+    store.close()
+    return paths
+
+
+def build_evaluation_identity(
+    paths: Sequence[Path],
+    settings: ReconstructionSettings,
+    max_scenarios: int | None,
+) -> EvaluationIdentity:
+    """Bind a checkpoint to exact input files and reconstruction settings."""
+
+    shards = []
+    for raw_path in paths:
+        path = Path(raw_path).resolve()
+        stat = path.stat()
+        shards.append(
+            {
+                "path": str(path),
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+            }
+        )
+    return EvaluationIdentity(
+        input_shards=tuple(shards),
+        reconstruction=settings.to_dict(),
+        max_scenarios=max_scenarios,
+        metric_schema=_METRIC_SCHEMA,
+    )
+
+
+def _scratch_marker_path(
+    scratch_dir: Path,
+) -> Path:
+    return scratch_dir / _SCRATCH_MARKER
+
+
+def _write_scratch_marker(
+    scratch_dir: Path,
+) -> None:
+    marker = _scratch_marker_path(scratch_dir)
+    temporary = marker.with_suffix(".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            stream.write(f"{_METRIC_SCHEMA}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, marker)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _prepare_scratch(
+    scratch_dir: Path,
+    *,
+    resume: bool,
+) -> None:
+    allowed = {
+        _SCRATCH_MARKER,
+        "checkpoint.json",
+        "metrics",
+    }
+    if not scratch_dir.exists():
+        scratch_dir.mkdir(parents=True)
+        _write_scratch_marker(scratch_dir)
+        return
+    if not scratch_dir.is_dir():
+        raise ValueError(
+            f"scratch path is not a directory: {scratch_dir}"
+        )
+    entries = list(scratch_dir.iterdir())
+    if not entries:
+        _write_scratch_marker(scratch_dir)
+        return
+    unknown = sorted(
+        path.name
+        for path in entries
+        if path.name not in allowed
+    )
+    if unknown:
+        raise ValueError(
+            f"scratch directory contains unknown entries: {unknown}"
+        )
+    if not resume:
+        raise ValueError(
+            "scratch directory is non-empty; use --resume or choose "
+            "a new scratch directory"
+        )
+    marker = _scratch_marker_path(scratch_dir)
+    checkpoint = scratch_dir / "checkpoint.json"
+    if not marker.is_file() or not checkpoint.is_file():
+        raise ValueError(
+            "scratch directory has no complete CatK checkpoint"
+        )
+    marker_value = marker.read_text(encoding="utf-8").strip()
+    if marker_value != _METRIC_SCHEMA:
+        raise ValueError("scratch marker identity is incompatible")
+
+
+def _delete_owned_scratch(
+    scratch_dir: Path,
+) -> None:
+    marker = _scratch_marker_path(scratch_dir)
+    if (
+        not marker.is_file()
+        or marker.read_text(encoding="utf-8").strip()
+        != _METRIC_SCHEMA
+    ):
+        raise ValueError(
+            "refusing to delete scratch without the CatK ownership marker"
+        )
+    allowed = {
+        _SCRATCH_MARKER,
+        "checkpoint.json",
+        "metrics",
+    }
+    unknown = [
+        path.name
+        for path in scratch_dir.iterdir()
+        if path.name not in allowed
+    ]
+    if unknown:
+        raise ValueError(
+            "refusing to delete scratch containing unknown entries: "
+            f"{sorted(unknown)}"
+        )
+    shutil.rmtree(scratch_dir)
+
+
+def _validated_runtime_values(
+    args,
+) -> tuple[int, int | None, int]:
+    workers = _integer_setting(args.workers, "workers")
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    max_scenarios = args.max_scenarios
+    if max_scenarios is not None:
+        max_scenarios = _integer_setting(
+            max_scenarios,
+            "max_scenarios",
+        )
+        if max_scenarios < 1:
+            raise ValueError("max_scenarios must be positive")
+    progress_every = _integer_setting(
+        args.progress_every,
+        "progress_every",
+    )
+    if progress_every < 0:
+        raise ValueError("progress_every must be non-negative")
+    return workers, max_scenarios, progress_every
+
+
+def _scenario_tasks(
+    path: Path,
+    settings: ReconstructionSettings,
+    limit: int | None,
+) -> Iterator[ScenarioTask]:
+    records: Iterable[tuple[int, bytes]] = iter_tfrecord(path)
+    if limit is not None:
+        records = islice(records, limit)
+    for record_index, payload in records:
+        yield ScenarioTask(
+            source_file=str(path),
+            record_index=record_index,
+            payload=payload,
+            settings=settings,
+        )
+
+
+def _result_stream(
+    path: Path,
+    settings: ReconstructionSettings,
+    limit: int | None,
+    workers: int,
+    executor,
+) -> Iterator[ScenarioEvaluationResult]:
+    tasks = _scenario_tasks(path, settings, limit)
+    if workers == 1:
+        for task in tasks:
+            yield evaluate_scenario_task(task)
+        return
+    yield from bounded_ordered_map(
+        executor,
+        evaluate_scenario_task,
+        tasks,
+        limit=workers * 2,
+    )
+
+
+def _consume_shard(
+    *,
+    path: Path,
+    settings: ReconstructionSettings,
+    remaining: int | None,
+    workers: int,
+    executor,
+    accumulator: EvaluationAccumulator,
+    reconstruction_counts: Counter,
+    store: ExactMetricStore,
+    progress,
+) -> None:
+    for result in _result_stream(
+        path,
+        settings,
+        remaining,
+        workers,
+        executor,
+    ):
+        if result.source_file != str(path):
+            raise ValueError(
+                "worker returned a result for the wrong TFRecord shard"
+            )
+        if result.scenario_id != result.metrics.scenario_id:
+            raise ValueError(
+                "worker scenario identity does not match its metric batch"
+            )
+        for key, value in result.reconstruction_counts.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"invalid reconstruction counter {key!r}: {value!r}"
+                )
+        accumulator.add_batch(result.metrics)
+        reconstruction_counts.update(
+            result.reconstruction_counts
+        )
+        store.append_batch(result.metrics)
+        progress.update(1)
+
+
+def _run_config_value(
+    *,
+    identity: EvaluationIdentity,
+    reconstruction_run_config: Path,
+    output_dir: Path,
+    scratch_dir: Path,
+    workers: int,
+    progress_every: int,
+    resume: bool,
+    keep_scratch: bool,
+) -> dict:
+    return {
+        "schema": _METRIC_SCHEMA,
+        "identity": identity.to_dict(),
+        "reconstruction_run_config": str(
+            reconstruction_run_config
+        ),
+        "output_dir": str(output_dir),
+        "scratch_dir": str(scratch_dir),
+        "workers": workers,
+        "progress_every": progress_every,
+        "resume": bool(resume),
+        "keep_scratch": bool(keep_scratch),
+    }
+
+
+def run_evaluation(
+    args,
+) -> tuple[Path, ...]:
+    """Run a resumable, exact reconstruction evaluation."""
+
+    from tqdm.auto import tqdm
+
+    workers, max_scenarios, progress_every = (
+        _validated_runtime_values(args)
+    )
+    raw_entries = args.input_path
+    if isinstance(raw_entries, (str, Path)):
+        raw_entries = [raw_entries]
+    paths = resolve_input_paths(
+        [str(entry) for entry in raw_entries]
+    )
+    settings = load_reconstruction_settings(
+        Path(args.reconstruction_run_config)
+    )
+    identity = build_evaluation_identity(
+        paths,
+        settings,
+        max_scenarios,
+    )
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    scratch_dir = Path(args.scratch_dir).expanduser().resolve()
+    if output_dir == scratch_dir:
+        raise ValueError(
+            "output and scratch directories must be different"
+        )
+    _reject_unknown_output_entries(output_dir)
+    _prepare_scratch(
+        scratch_dir,
+        resume=bool(args.resume),
+    )
+
+    checkpoint_path = scratch_dir / "checkpoint.json"
+    store = ExactMetricStore(scratch_dir / "metrics")
+    executor = (
+        ProcessPoolExecutor(max_workers=workers)
+        if workers > 1
+        else None
+    )
+    progress = tqdm(
+        total=max_scenarios,
+        initial=0,
+        unit="scenario",
+        desc="Evaluate reconstruction",
+        miniters=max(1, progress_every),
+        disable=progress_every == 0,
+    )
+    try:
+        if bool(args.resume) and checkpoint_path.is_file():
+            checkpoint = restore_checkpoint(
+                store,
+                checkpoint_path,
+                identity,
+            )
+            accumulator = EvaluationAccumulator.from_state(
+                checkpoint.accumulator_state
+            )
+            reconstruction_counts = Counter(
+                checkpoint.reconstruction_counts
+            )
+            completed = set(checkpoint.completed_shards)
+            progress.update(accumulator.scenarios)
+        else:
+            accumulator = EvaluationAccumulator()
+            reconstruction_counts = Counter()
+            completed = set()
+            write_checkpoint(
+                checkpoint_path,
+                EvaluationCheckpoint(
+                    identity=identity,
+                    completed_shards=[],
+                    buffer_counts=store.snapshot_counts(),
+                    accumulator_state=accumulator.to_state(),
+                    reconstruction_counts={},
+                ),
+            )
+
+        for path in paths:
+            if (
+                max_scenarios is not None
+                and accumulator.scenarios >= max_scenarios
+            ):
+                break
+            if str(path) in completed:
+                continue
+            remaining = (
+                None
+                if max_scenarios is None
+                else max_scenarios - accumulator.scenarios
+            )
+            committed_counts = store.snapshot_counts()
+            try:
+                _consume_shard(
+                    path=path,
+                    settings=settings,
+                    remaining=remaining,
+                    workers=workers,
+                    executor=executor,
+                    accumulator=accumulator,
+                    reconstruction_counts=reconstruction_counts,
+                    store=store,
+                    progress=progress,
+                )
+                store.flush_and_sync()
+                completed.add(str(path))
+                write_checkpoint(
+                    checkpoint_path,
+                    EvaluationCheckpoint(
+                        identity=identity,
+                        completed_shards=[
+                            str(candidate)
+                            for candidate in paths
+                            if str(candidate) in completed
+                        ],
+                        buffer_counts=store.snapshot_counts(),
+                        accumulator_state=accumulator.to_state(),
+                        reconstruction_counts=dict(
+                            reconstruction_counts
+                        ),
+                    ),
+                )
+            except BaseException:
+                store.truncate_to(committed_counts)
+                raise
+
+        run_config = _run_config_value(
+            identity=identity,
+            reconstruction_run_config=Path(
+                args.reconstruction_run_config
+            ).expanduser().resolve(),
+            output_dir=output_dir,
+            scratch_dir=scratch_dir,
+            workers=workers,
+            progress_every=progress_every,
+            resume=bool(args.resume),
+            keep_scratch=bool(args.keep_scratch),
+        )
+        outputs = write_final_outputs(
+            output_dir=output_dir,
+            accumulator=accumulator,
+            store=store,
+            reconstruction_counts=reconstruction_counts,
+            run_config=run_config,
+        )
+        if not bool(args.keep_scratch):
+            _delete_owned_scratch(scratch_dir)
+        return outputs
+    finally:
+        progress.close()
+        store.close()
+        if executor is not None:
+            executor.shutdown(
+                wait=True,
+                cancel_futures=True,
+            )
+
+
+def parse_args(
+    argv: Sequence[str] | None = None,
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Rerun CatK's bundled batch reconstruction from original WOMD "
+            "TFRecords and calculate exact raw/reconstructed metrics without "
+            "saving reconstructed trajectories."
+        )
+    )
+    parser.add_argument(
+        "--input-path",
+        nargs="+",
+        required=True,
+        metavar="ENTRY",
+        help=(
+            "One or more explicit TFRecord files, or a directory containing "
+            "a complete canonical training shard set."
+        ),
+    )
+    parser.add_argument(
+        "--reconstruction-run-config",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help=(
+            "run_config.json from the completed CatK batch reconstruction."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="Directory receiving the five final CSV/JSON files.",
+    )
+    parser.add_argument(
+        "--scratch-dir",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Disk-backed exact float64 buffers and shard checkpoint directory."
+        ),
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Scenario reconstruction process count (default: 1).",
+    )
+    parser.add_argument(
+        "--max-scenarios",
+        type=int,
+        default=None,
+        help="Optional positive global scenario limit for a smoke run.",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=100,
+        help=(
+            "Minimum progress refresh interval in scenarios; 0 disables "
+            "the progress bar (default: 100)."
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from the last complete TFRecord-shard checkpoint.",
+    )
+    parser.add_argument(
+        "--keep-scratch",
+        action="store_true",
+        help="Retain exact scalar buffers after successful finalization.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(
+    argv: Sequence[str] | None = None,
+) -> None:
+    outputs = run_evaluation(parse_args(argv))
+    print("Exact reconstruction evaluation outputs:")
+    for path in outputs:
+        print(f"  {path}")
+
+
+if __name__ == "__main__":
+    main()
