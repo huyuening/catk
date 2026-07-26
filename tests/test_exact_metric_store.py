@@ -6,7 +6,12 @@ import numpy as np
 
 from src.smart.tokens.exact_metric_store import (
     BufferKey,
+    EvaluationCheckpoint,
+    EvaluationIdentity,
     ExactMetricStore,
+    load_checkpoint,
+    restore_checkpoint,
+    write_checkpoint,
 )
 from src.smart.tokens.reconstruction_evaluation import ScenarioMetricBatch
 
@@ -25,6 +30,27 @@ def metric_batch(
                 "raw_linear_jerk_mps3": values - 50.0,
             }
         },
+    )
+
+
+def identity(size: int = 100) -> EvaluationIdentity:
+    return EvaluationIdentity(
+        input_shards=(
+            {
+                "path": "/data/training.tfrecord-00000-of-01000",
+                "size": size,
+                "mtime_ns": 123,
+            },
+        ),
+        reconstruction={
+            "method": "batch",
+            "filter_strength": "strong",
+            "max_gap_frames": -1,
+            "batch_linear_jerk_weight": 1.0,
+            "batch_angular_jerk_weight": 1.0,
+        },
+        max_scenarios=None,
+        metric_schema="exact-reconstruction-v1",
     )
 
 
@@ -130,6 +156,79 @@ class ExactMetricStoreTest(unittest.TestCase):
         self.assertEqual(counts[key], 2)
         self.assertAlmostEqual(actual.p01, 1.01)
         self.assertAlmostEqual(actual.p99, 1.99)
+
+
+class CheckpointTest(unittest.TestCase):
+    def test_checkpoint_round_trip_and_identity_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.json"
+            checkpoint = EvaluationCheckpoint(
+                identity=identity(),
+                completed_shards=[
+                    "/data/training.tfrecord-00000-of-01000"
+                ],
+                buffer_counts={},
+                accumulator_state={
+                    "scenarios": 496,
+                    "agents": 10,
+                    "agent_moments": {},
+                    "frame_moments": {},
+                },
+                reconstruction_counts={"total_tracks": 10},
+            )
+            write_checkpoint(path, checkpoint)
+            restored = load_checkpoint(path, identity())
+
+            self.assertEqual(
+                restored.completed_shards,
+                checkpoint.completed_shards,
+            )
+            with self.assertRaisesRegex(ValueError, "identity"):
+                load_checkpoint(path, identity(size=101))
+
+    def test_restore_truncates_bytes_after_last_committed_shard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ExactMetricStore(root / "metrics")
+            store.append_batch(
+                metric_batch("vehicle", np.asarray([1.0, 2.0]))
+            )
+            store.flush_and_sync()
+            committed = store.snapshot_counts()
+            checkpoint = EvaluationCheckpoint(
+                identity=identity(),
+                completed_shards=[
+                    "/data/training.tfrecord-00000-of-01000"
+                ],
+                buffer_counts=committed,
+                accumulator_state={
+                    "scenarios": 1,
+                    "agents": 2,
+                    "agent_moments": {},
+                    "frame_moments": {},
+                },
+                reconstruction_counts={},
+            )
+            path = root / "checkpoint.json"
+            write_checkpoint(path, checkpoint)
+            store.append_batch(
+                metric_batch("vehicle", np.asarray([99.0]))
+            )
+            store.flush_and_sync()
+
+            restored = restore_checkpoint(
+                store,
+                path,
+                identity(),
+            )
+            counts = store.snapshot_counts()
+            store.close()
+
+        self.assertEqual(
+            restored.completed_shards,
+            ["/data/training.tfrecord-00000-of-01000"],
+        )
+        self.assertEqual(counts, committed)
 
 
 if __name__ == "__main__":
