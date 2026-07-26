@@ -74,6 +74,7 @@ _TRAINING_SHARD_PATTERN = re.compile(
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _METRIC_SCHEMA = "exact-reconstruction-v1"
 _SCRATCH_MARKER = ".catk_exact_reconstruction_scratch"
+_FINALIZATION_COPY = "finalization_metrics"
 _FINAL_OUTPUT_NAMES = (
     "agent_summary.csv",
     "frame_jerk_summary.csv",
@@ -948,6 +949,7 @@ def _prepare_scratch(
         _SCRATCH_MARKER,
         "checkpoint.json",
         "metrics",
+        _FINALIZATION_COPY,
     }
     if not scratch_dir.exists():
         scratch_dir.mkdir(parents=True)
@@ -984,6 +986,16 @@ def _prepare_scratch(
     marker_value = marker.read_text(encoding="utf-8").strip()
     if marker_value != _METRIC_SCHEMA:
         raise ValueError("scratch marker identity is incompatible")
+    finalization_copy = scratch_dir / _FINALIZATION_COPY
+    if finalization_copy.exists():
+        if (
+            finalization_copy.is_symlink()
+            or not finalization_copy.is_dir()
+        ):
+            raise ValueError(
+                "scratch finalization copy is not a regular directory"
+            )
+        shutil.rmtree(finalization_copy)
 
 
 def _delete_owned_scratch(
@@ -1002,6 +1014,7 @@ def _delete_owned_scratch(
         _SCRATCH_MARKER,
         "checkpoint.json",
         "metrics",
+        _FINALIZATION_COPY,
     }
     unknown = [
         path.name
@@ -1329,6 +1342,7 @@ def run_evaluation(
                 ),
             )
 
+        has_uncommitted_partial = False
         for path in paths:
             if (
                 max_scenarios is not None
@@ -1380,6 +1394,8 @@ def run_evaluation(
                             ),
                         ),
                     )
+                else:
+                    has_uncommitted_partial = True
             except BaseException:
                 store.truncate_to(committed_counts)
                 raise
@@ -1396,13 +1412,39 @@ def run_evaluation(
             resume=bool(args.resume),
             keep_scratch=bool(args.keep_scratch),
         )
-        outputs = write_final_outputs(
-            output_dir=output_dir,
-            accumulator=accumulator,
-            store=store,
-            reconstruction_counts=reconstruction_counts,
-            run_config=run_config,
-        )
+        finalization_copy = None
+        finalization_store = store
+        try:
+            if has_uncommitted_partial:
+                store.flush_and_sync()
+                finalization_copy = (
+                    scratch_dir
+                    / _FINALIZATION_COPY
+                )
+                if finalization_copy.exists():
+                    shutil.rmtree(finalization_copy)
+                shutil.copytree(
+                    scratch_dir / "metrics",
+                    finalization_copy,
+                )
+                finalization_store = ExactMetricStore(
+                    finalization_copy
+                )
+            outputs = write_final_outputs(
+                output_dir=output_dir,
+                accumulator=accumulator,
+                store=finalization_store,
+                reconstruction_counts=reconstruction_counts,
+                run_config=run_config,
+            )
+        finally:
+            if finalization_store is not store:
+                finalization_store.close()
+            if (
+                finalization_copy is not None
+                and finalization_copy.exists()
+            ):
+                shutil.rmtree(finalization_copy)
         if not bool(args.keep_scratch):
             _delete_owned_scratch(scratch_dir)
         return outputs

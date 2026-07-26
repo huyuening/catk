@@ -472,6 +472,91 @@ class EvaluationOutputTest(unittest.TestCase):
 
 
 class EvaluationResumeTest(unittest.TestCase):
+    def test_partial_smoke_finalization_preserves_committed_buffer_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "training"
+            input_dir.mkdir()
+            first = input_dir / "training.tfrecord-00000-of-00002"
+            second = input_dir / "training.tfrecord-00001-of-00002"
+            write_tfrecord(first, [b"first-0", b"first-1"])
+            write_tfrecord(second, [b"second-0", b"second-1"])
+            run_config = root / "reconstruction_run_config.json"
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "method": "batch",
+                        "filter_strength": "strong",
+                        "max_gap_frames": -1,
+                        "batch_linear_jerk_weight": 1.0,
+                        "batch_angular_jerk_weight": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                input_path=[str(input_dir)],
+                reconstruction_run_config=run_config,
+                output_dir=root / "output",
+                scratch_dir=root / "scratch",
+                workers=1,
+                max_scenarios=3,
+                progress_every=0,
+                resume=False,
+                keep_scratch=True,
+            )
+            values = iter([100.0, 200.0, -999.0])
+
+            def result_for(task):
+                batch = summary_metric_batch(
+                    "vehicle",
+                    np.asarray([next(values)]),
+                )
+                return ScenarioEvaluationResult(
+                    source_file=task.source_file,
+                    record_index=task.record_index,
+                    scenario_id=batch.scenario_id,
+                    metrics=batch,
+                    reconstruction_counts={
+                        "total_tracks": 1,
+                        "processed_tracks": 1,
+                    },
+                )
+
+            with patch(
+                "src.smart.tokens.evaluate_trajectory_reconstruction."
+                "evaluate_scenario_task",
+                side_effect=result_for,
+            ):
+                run_evaluation(args)
+
+            buffer = np.fromfile(
+                root
+                / "scratch"
+                / "metrics"
+                / "buffers"
+                / "agent"
+                / "vehicle"
+                / "xy_rmse_m.f64",
+                dtype="<f8",
+            )
+            np.testing.assert_array_equal(
+                buffer,
+                np.asarray([100.0, 200.0, -999.0]),
+            )
+            checkpoint = json.loads(
+                (
+                    root
+                    / "scratch"
+                    / "checkpoint.json"
+                ).read_text(encoding="utf-8")
+            )
+            committed_key = "agent|vehicle|xy_rmse_m"
+            self.assertEqual(
+                checkpoint["buffer_counts"][committed_key],
+                2,
+            )
+
     def test_shard_metadata_change_rolls_back_uncommitted_metrics(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
