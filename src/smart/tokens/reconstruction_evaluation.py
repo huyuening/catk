@@ -362,11 +362,20 @@ def evaluate_track(
     """Evaluate one track pair on raw-matched and reconstructed-full support."""
 
     time = list(timestamps)
-    count = min(
-        len(raw_track.states),
-        len(reconstructed_track.states),
-        len(time),
-    )
+    raw_count = len(raw_track.states)
+    reconstructed_count = len(reconstructed_track.states)
+    track_id = int(raw_track.id)
+    if raw_count != reconstructed_count:
+        raise ValueError(
+            f"track {track_id} raw/reconstructed state counts differ: "
+            f"{raw_count} != {reconstructed_count}"
+        )
+    if len(time) < raw_count:
+        raise ValueError(
+            f"track {track_id} has {raw_count} states but only "
+            f"{len(time)} timestamps"
+        )
+    count = raw_count
     raw_position, raw_valid = _track_arrays(raw_track, count)
     reconstructed_position, reconstructed_valid = _track_arrays(
         reconstructed_track,
@@ -520,6 +529,14 @@ def evaluate_scenario_pair(
 
     if raw_scenario.scenario_id != reconstructed_scenario.scenario_id:
         raise ValueError("raw and reconstructed scenario IDs differ")
+    reconstructed_ids = [
+        int(track.id)
+        for track in reconstructed_scenario.tracks
+    ]
+    if len(set(reconstructed_ids)) != len(reconstructed_ids):
+        raise ValueError(
+            "reconstructed scenario track IDs must be unique"
+        )
     reconstructed_by_id = {
         int(track.id): track
         for track in reconstructed_scenario.tracks

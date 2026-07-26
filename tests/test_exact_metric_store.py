@@ -71,6 +71,42 @@ class ExactMetricStoreTest(unittest.TestCase):
         self.assertEqual(actual.p99, 98.01)
         self.assertAlmostEqual(actual.p99_minus_p01, 97.02)
 
+    def test_percentiles_match_numpy_for_signed_odd_and_singleton_streams(self):
+        generator = np.random.default_rng(17)
+        streams = (
+            np.asarray([3.5], dtype=np.float64),
+            np.asarray([-9.0, -2.0, 0.0, 4.0, 11.0]),
+            generator.normal(size=101).astype(np.float64),
+        )
+        for values in streams:
+            with self.subTest(count=len(values)):
+                with tempfile.TemporaryDirectory() as directory:
+                    store = ExactMetricStore(Path(directory))
+                    store.append_batch(metric_batch("vehicle", values))
+                    expected = np.percentile(
+                        values,
+                        [1.0, 99.0],
+                        method="linear",
+                    )
+
+                    actual = store.percentiles(
+                        BufferKey(
+                            "agent",
+                            "vehicle",
+                            "xy_rmse_m",
+                        )
+                    )
+                    store.close()
+
+                self.assertAlmostEqual(
+                    actual.p01,
+                    float(expected[0]),
+                )
+                self.assertAlmostEqual(
+                    actual.p99,
+                    float(expected[1]),
+                )
+
     def test_store_filters_nonfinite_values(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ExactMetricStore(Path(directory))

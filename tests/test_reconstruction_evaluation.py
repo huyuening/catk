@@ -125,6 +125,41 @@ class ReconstructionEvaluationTest(unittest.TestCase):
             (1,),
         )
 
+    def test_track_rejects_mismatched_state_counts_and_timestamps(self):
+        raw_scenario = build_scenario(count=25)
+        reconstructed_scenario = copy.deepcopy(raw_scenario)
+        del reconstructed_scenario.tracks[0].states[-1]
+
+        with self.assertRaisesRegex(ValueError, "state counts"):
+            evaluate_track(
+                raw_scenario.tracks[0],
+                reconstructed_scenario.tracks[0],
+                raw_scenario.timestamps_seconds,
+            )
+
+        reconstructed_scenario = copy.deepcopy(raw_scenario)
+        with self.assertRaisesRegex(ValueError, "timestamps"):
+            evaluate_track(
+                raw_scenario.tracks[0],
+                reconstructed_scenario.tracks[0],
+                raw_scenario.timestamps_seconds[:-1],
+            )
+
+    def test_scenario_pair_rejects_duplicate_reconstructed_track_ids(self):
+        raw_scenario = build_scenario(count=25)
+        reconstructed_scenario = copy.deepcopy(raw_scenario)
+        duplicate = reconstructed_scenario.tracks.add()
+        duplicate.CopyFrom(reconstructed_scenario.tracks[0])
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "reconstructed.*unique",
+        ):
+            evaluate_scenario_pair(
+                raw_scenario,
+                reconstructed_scenario,
+            )
+
     def test_incomplete_reconstructed_support_invalidates_paired_jerk(self):
         raw_scenario = build_scenario(count=15)
         reconstructed_scenario = copy.deepcopy(raw_scenario)

@@ -18,13 +18,16 @@ from __future__ import annotations
 import argparse
 import csv
 import dataclasses
+import glob
 import importlib
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import struct
+import subprocess
 import sys
 from collections import Counter, deque
 from concurrent.futures import ProcessPoolExecutor
@@ -32,6 +35,8 @@ from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
+
+import numpy as np
 
 os.environ.setdefault(
     "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION",
@@ -104,6 +109,39 @@ class ReconstructionSettings:
     batch_linear_jerk_weight: float
     batch_angular_jerk_weight: float
 
+    def __post_init__(self) -> None:
+        if self.method != "batch":
+            raise ValueError(
+                "reconstruction method must be 'batch' for this evaluator"
+            )
+        if self.filter_strength not in FILTER_STRENGTHS:
+            valid = ", ".join(FILTER_STRENGTHS)
+            raise ValueError(
+                f"filter_strength must be one of: {valid}"
+            )
+        max_gap_frames = _integer_setting(
+            self.max_gap_frames,
+            "max_gap_frames",
+        )
+        if max_gap_frames < -1:
+            raise ValueError("max_gap_frames must be at least -1")
+        object.__setattr__(
+            self,
+            "batch_linear_jerk_weight",
+            _weight_setting(
+                self.batch_linear_jerk_weight,
+                "batch_linear_jerk_weight",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "batch_angular_jerk_weight",
+            _weight_setting(
+                self.batch_angular_jerk_weight,
+                "batch_angular_jerk_weight",
+            ),
+        )
+
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
 
@@ -131,6 +169,24 @@ class ScenarioTask:
     record_index: int
     payload: bytes
     settings: ReconstructionSettings
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_file, str) or not self.source_file:
+            raise ValueError("scenario source_file must be non-empty")
+        if (
+            isinstance(self.record_index, bool)
+            or not isinstance(self.record_index, int)
+            or self.record_index < 0
+        ):
+            raise ValueError(
+                "scenario record_index must be a non-negative integer"
+            )
+        if not isinstance(self.payload, bytes):
+            raise ValueError("scenario payload must be bytes")
+        if not isinstance(self.settings, ReconstructionSettings):
+            raise ValueError(
+                "scenario settings must be ReconstructionSettings"
+            )
 
 
 @dataclass(frozen=True)
@@ -284,6 +340,24 @@ def resolve_input_paths(
         raise ValueError("at least one input path is required")
     resolved: list[Path] = []
     for raw_entry in entries:
+        expanded = os.path.expanduser(str(raw_entry))
+        if glob.has_magic(expanded):
+            matches = sorted(
+                Path(match).resolve()
+                for match in glob.glob(expanded)
+                if Path(match).is_file()
+                and _TRAINING_SHARD_PATTERN.fullmatch(
+                    Path(match).name
+                )
+                is not None
+            )
+            if not matches:
+                raise FileNotFoundError(
+                    "No canonical training shards matched glob: "
+                    f"{raw_entry}"
+                )
+            resolved.extend(matches)
+            continue
         entry = Path(raw_entry).expanduser().resolve()
         if entry.is_file():
             resolved.append(entry)
@@ -299,38 +373,86 @@ def resolve_input_paths(
 
 def iter_tfrecord(
     path: Path,
+    *,
+    expected_size: int | None = None,
+    expected_mtime_ns: int | None = None,
 ) -> Iterator[tuple[int, bytes]]:
     """Read uncompressed TFRecord framing without importing TensorFlow."""
 
     path = Path(path)
-    file_size = path.stat().st_size
     with path.open("rb") as stream:
-        record_index = 0
-        while True:
-            header = stream.read(12)
-            if not header:
-                break
-            if len(header) != 12:
-                raise ValueError(
-                    f"{path}: truncated TFRecord header at record "
-                    f"{record_index}"
-                )
-            (length,) = struct.unpack("<Q", header[:8])
-            remaining = file_size - stream.tell()
-            if length + 4 > remaining:
-                raise ValueError(
-                    f"{path}: truncated TFRecord payload at record "
-                    f"{record_index}"
-                )
-            payload = stream.read(length)
-            footer_crc = stream.read(4)
-            if len(payload) != length or len(footer_crc) != 4:
-                raise ValueError(
-                    f"{path}: truncated TFRecord payload at record "
-                    f"{record_index}"
-                )
-            yield record_index, payload
-            record_index += 1
+        opened_stat = os.fstat(stream.fileno())
+        _validate_tfrecord_metadata(
+            path,
+            opened_stat,
+            expected_size=expected_size,
+            expected_mtime_ns=expected_mtime_ns,
+        )
+        file_size = opened_stat.st_size
+        try:
+            record_index = 0
+            while True:
+                header = stream.read(12)
+                if not header:
+                    break
+                if len(header) != 12:
+                    raise ValueError(
+                        f"{path}: truncated TFRecord header at record "
+                        f"{record_index}"
+                    )
+                (length,) = struct.unpack("<Q", header[:8])
+                remaining = file_size - stream.tell()
+                if length + 4 > remaining:
+                    raise ValueError(
+                        f"{path}: truncated TFRecord payload at record "
+                        f"{record_index}"
+                    )
+                payload = stream.read(length)
+                footer_crc = stream.read(4)
+                if len(payload) != length or len(footer_crc) != 4:
+                    raise ValueError(
+                        f"{path}: truncated TFRecord payload at record "
+                        f"{record_index}"
+                    )
+                yield record_index, payload
+                record_index += 1
+        finally:
+            _validate_tfrecord_metadata(
+                path,
+                os.fstat(stream.fileno()),
+                expected_size=expected_size,
+                expected_mtime_ns=expected_mtime_ns,
+            )
+
+
+def _validate_tfrecord_metadata(
+    path: Path,
+    stat_result,
+    *,
+    expected_size: int | None,
+    expected_mtime_ns: int | None,
+) -> None:
+    mismatches = []
+    if (
+        expected_size is not None
+        and int(stat_result.st_size) != int(expected_size)
+    ):
+        mismatches.append(
+            f"size {stat_result.st_size} != {expected_size}"
+        )
+    if (
+        expected_mtime_ns is not None
+        and int(stat_result.st_mtime_ns) != int(expected_mtime_ns)
+    ):
+        mismatches.append(
+            f"mtime_ns {stat_result.st_mtime_ns} != "
+            f"{expected_mtime_ns}"
+        )
+    if mismatches:
+        raise ValueError(
+            f"{path}: TFRecord metadata changed: "
+            + ", ".join(mismatches)
+        )
 
 
 def count_tfrecord_records(
@@ -397,28 +519,39 @@ def evaluate_scenario_task(
 ) -> ScenarioEvaluationResult:
     """Reconstruct one scenario in memory and return metric arrays only."""
 
-    scenario_class = _load_scenario_class()
-    scenario = scenario_class()
-    scenario.ParseFromString(task.payload)
-    scenario_id = str(scenario.scenario_id)
-    reconstructed, reconstruction_stats = (
-        reconstruct_scenario_for_vocabulary(
-            scenario,
-            task.settings.to_reconstruction_config(),
+    scenario_id = "<unparsed>"
+    try:
+        scenario_class = _load_scenario_class()
+        scenario = scenario_class()
+        scenario.ParseFromString(task.payload)
+        scenario_id = str(scenario.scenario_id)
+        if not scenario_id:
+            raise ValueError("parsed WOMD scenario has no scenario_id")
+        reconstructed, reconstruction_stats = (
+            reconstruct_scenario_for_vocabulary(
+                scenario,
+                task.settings.to_reconstruction_config(),
+            )
         )
-    )
-    metrics = evaluate_scenario_pair(
-        scenario,
-        reconstructed,
-    )
+        metrics = evaluate_scenario_pair(
+            scenario,
+            reconstructed,
+        )
+        reconstruction_counts = _integer_reconstruction_counts(
+            reconstruction_stats
+        )
+    except Exception as error:
+        raise RuntimeError(
+            "failed reconstruction evaluation at "
+            f"{task.source_file}, record {task.record_index}, "
+            f"scenario {scenario_id}"
+        ) from error
     return ScenarioEvaluationResult(
         source_file=task.source_file,
         record_index=task.record_index,
         scenario_id=scenario_id,
         metrics=metrics,
-        reconstruction_counts=_integer_reconstruction_counts(
-            reconstruction_stats
-        ),
+        reconstruction_counts=reconstruction_counts,
     )
 
 
@@ -702,10 +835,25 @@ def write_final_outputs(
     reconstruction = _reconstruction_summary(
         reconstruction_counts
     )
+    reconstruction_provenance = run_config.get(
+        "reconstruction",
+        {},
+    )
+    if not isinstance(reconstruction_provenance, Mapping):
+        raise ValueError(
+            "run_config reconstruction provenance must be a mapping"
+        )
     summary = {
         "schema": "exact-reconstruction-v1",
         "scenario_count": accumulator.scenarios,
+        "failure_count": 0,
         "agent_count": accumulator.agents,
+        "reconstruction_provenance": dict(
+            reconstruction_provenance
+        ),
+        "software_provenance": dict(
+            run_config.get("software", {})
+        ),
         "statistics": {
             "dtype": "float64",
             "standard_deviation": "population (ddof=0)",
@@ -895,27 +1043,67 @@ def _scenario_tasks(
     path: Path,
     settings: ReconstructionSettings,
     limit: int | None,
+    expected_metadata: Mapping[str, object],
 ) -> Iterator[ScenarioTask]:
-    records: Iterable[tuple[int, bytes]] = iter_tfrecord(path)
-    if limit is not None:
-        records = islice(records, limit)
-    for record_index, payload in records:
-        yield ScenarioTask(
-            source_file=str(path),
-            record_index=record_index,
-            payload=payload,
-            settings=settings,
+    record_iterator = iter_tfrecord(
+        path,
+        expected_size=int(expected_metadata["size"]),
+        expected_mtime_ns=int(expected_metadata["mtime_ns"]),
+    )
+    records: Iterable[tuple[int, bytes]] = record_iterator
+    try:
+        if limit is not None:
+            records = islice(records, limit)
+        for record_index, payload in records:
+            yield ScenarioTask(
+                source_file=str(path),
+                record_index=record_index,
+                payload=payload,
+                settings=settings,
+            )
+    finally:
+        record_iterator.close()
+
+
+def _shard_fits_limit(
+    path: Path,
+    limit: int | None,
+    expected_metadata: Mapping[str, object],
+) -> bool:
+    if limit is None:
+        return True
+    record_iterator = iter_tfrecord(
+        path,
+        expected_size=int(expected_metadata["size"]),
+        expected_mtime_ns=int(expected_metadata["mtime_ns"]),
+    )
+    try:
+        count = sum(
+            1
+            for _ in islice(
+                record_iterator,
+                limit + 1,
+            )
         )
+    finally:
+        record_iterator.close()
+    return count <= limit
 
 
 def _result_stream(
     path: Path,
     settings: ReconstructionSettings,
     limit: int | None,
+    expected_metadata: Mapping[str, object],
     workers: int,
     executor,
 ) -> Iterator[ScenarioEvaluationResult]:
-    tasks = _scenario_tasks(path, settings, limit)
+    tasks = _scenario_tasks(
+        path,
+        settings,
+        limit,
+        expected_metadata,
+    )
     if workers == 1:
         for task in tasks:
             yield evaluate_scenario_task(task)
@@ -933,6 +1121,7 @@ def _consume_shard(
     path: Path,
     settings: ReconstructionSettings,
     remaining: int | None,
+    expected_metadata: Mapping[str, object],
     workers: int,
     executor,
     accumulator: EvaluationAccumulator,
@@ -944,6 +1133,7 @@ def _consume_shard(
         path,
         settings,
         remaining,
+        expected_metadata,
         workers,
         executor,
     ):
@@ -970,6 +1160,12 @@ def _consume_shard(
         )
         store.append_batch(result.metrics)
         progress.update(1)
+    _validate_tfrecord_metadata(
+        path,
+        path.stat(),
+        expected_size=int(expected_metadata["size"]),
+        expected_mtime_ns=int(expected_metadata["mtime_ns"]),
+    )
 
 
 def _run_config_value(
@@ -986,6 +1182,7 @@ def _run_config_value(
     return {
         "schema": _METRIC_SCHEMA,
         "identity": identity.to_dict(),
+        "reconstruction": dict(identity.reconstruction),
         "reconstruction_run_config": str(
             reconstruction_run_config
         ),
@@ -995,6 +1192,51 @@ def _run_config_value(
         "progress_every": progress_every,
         "resume": bool(resume),
         "keep_scratch": bool(keep_scratch),
+        "statistics": {
+            "dtype": "float64",
+            "standard_deviation_ddof": 0,
+            "percentile_method": "NumPy linear",
+            "percentiles": [1, 99],
+            "exact": True,
+        },
+        "software": _software_provenance(),
+    }
+
+
+def _git_output(
+    *arguments: str,
+) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
+
+
+def _software_provenance() -> dict:
+    status = _git_output(
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+    )
+    return {
+        "python": platform.python_version(),
+        "numpy": np.__version__,
+        "catk_git_commit": _git_output("rev-parse", "HEAD"),
+        "catk_git_dirty": (
+            bool(status)
+            if status is not None
+            else None
+        ),
     }
 
 
@@ -1022,11 +1264,19 @@ def run_evaluation(
         settings,
         max_scenarios,
     )
+    metadata_by_path = {
+        shard["path"]: shard
+        for shard in identity.input_shards
+    }
     output_dir = Path(args.output_dir).expanduser().resolve()
     scratch_dir = Path(args.scratch_dir).expanduser().resolve()
-    if output_dir == scratch_dir:
+    if (
+        output_dir == scratch_dir
+        or output_dir in scratch_dir.parents
+        or scratch_dir in output_dir.parents
+    ):
         raise ValueError(
-            "output and scratch directories must be different"
+            "output and scratch directories must be separate and non-nested"
         )
     _reject_unknown_output_entries(output_dir)
     _prepare_scratch(
@@ -1094,10 +1344,16 @@ def run_evaluation(
             )
             committed_counts = store.snapshot_counts()
             try:
+                shard_is_complete = _shard_fits_limit(
+                    path,
+                    remaining,
+                    metadata_by_path[str(path)],
+                )
                 _consume_shard(
                     path=path,
                     settings=settings,
                     remaining=remaining,
+                    expected_metadata=metadata_by_path[str(path)],
                     workers=workers,
                     executor=executor,
                     accumulator=accumulator,
@@ -1105,24 +1361,25 @@ def run_evaluation(
                     store=store,
                     progress=progress,
                 )
-                store.flush_and_sync()
-                completed.add(str(path))
-                write_checkpoint(
-                    checkpoint_path,
-                    EvaluationCheckpoint(
-                        identity=identity,
-                        completed_shards=[
-                            str(candidate)
-                            for candidate in paths
-                            if str(candidate) in completed
-                        ],
-                        buffer_counts=store.snapshot_counts(),
-                        accumulator_state=accumulator.to_state(),
-                        reconstruction_counts=dict(
-                            reconstruction_counts
+                if shard_is_complete:
+                    store.flush_and_sync()
+                    completed.add(str(path))
+                    write_checkpoint(
+                        checkpoint_path,
+                        EvaluationCheckpoint(
+                            identity=identity,
+                            completed_shards=[
+                                str(candidate)
+                                for candidate in paths
+                                if str(candidate) in completed
+                            ],
+                            buffer_counts=store.snapshot_counts(),
+                            accumulator_state=accumulator.to_state(),
+                            reconstruction_counts=dict(
+                                reconstruction_counts
+                            ),
                         ),
-                    ),
-                )
+                    )
             except BaseException:
                 store.truncate_to(committed_counts)
                 raise
