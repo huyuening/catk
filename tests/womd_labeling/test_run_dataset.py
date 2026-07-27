@@ -5,6 +5,10 @@ import json
 import pytest
 
 from src.womd_labeling import run_dataset as runner
+from src.womd_labeling.annotate import (
+    annotate_paths,
+    parse_args as parse_annotation_args,
+)
 
 from .helpers import make_scenario, write_tfrecord
 
@@ -191,6 +195,38 @@ def test_visualization_stage_requires_compatible_annotations(tmp_path):
                     "scenario-visualizations",
                 ]
             )
+        )
+
+
+def test_annotation_dependency_rejects_old_summary_schema(tmp_path):
+    input_path = tmp_path / "training.tfrecord-00000-of-00001"
+    write_tfrecord(
+        input_path,
+        [make_scenario("scenario-a").SerializeToString()],
+    )
+    annotation_dir = tmp_path / "annotations"
+    annotate_paths(
+        parse_annotation_args(
+            [
+                "--input-path",
+                str(input_path),
+                "--output-dir",
+                str(annotation_dir),
+            ]
+        )
+    )
+    summary_path = annotation_dir / "summary.json"
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = "ego-map-annotation-old"
+    summary_path.write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="annotations stage"):
+        runner._require_annotation_outputs(
+            annotation_dir,
+            [input_path.resolve()],
         )
 
 

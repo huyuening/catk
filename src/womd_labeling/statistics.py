@@ -1341,6 +1341,8 @@ def run_statistics(args: argparse.Namespace) -> dict:
                     {
                         "schema_version": STATISTICS_SHARD_SCHEMA_VERSION,
                         "source": source_identity,
+                        "source_order": source_order,
+                        "shard_global_start": shard_global_starts[path],
                         "selection": {
                             "start": selected_indices.start,
                             "stop": selected_indices.stop,
@@ -1504,7 +1506,10 @@ def run_statistics(args: argparse.Namespace) -> dict:
                                     frame_index,
                                 )
                                 pending[future] = record_index
-                                if len(pending) >= args.workers * 3:
+                                while (
+                                    len(pending) + len(result_buffer)
+                                    >= args.workers * 3
+                                ):
                                     drain_completed()
                             while pending:
                                 drain_completed()

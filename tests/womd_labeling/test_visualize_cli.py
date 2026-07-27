@@ -87,6 +87,39 @@ def test_renders_annotated_scenario_and_manifest(tmp_path):
     )
     assert resumed["images_skipped"] == 1
 
+    annotation_path = next(
+        annotation_dir.glob("*.map-annotations.jsonl.gz")
+    )
+    with gzip.open(annotation_path, "rt", encoding="utf-8") as stream:
+        annotation_rows = [json.loads(line) for line in stream]
+    rendered_frame = next(
+        frame
+        for frame in annotation_rows[0]["ego_frames"]
+        if frame["frame_index"] == 10
+    )
+    rendered_frame["confidence"] = 0.123456
+    with gzip.open(annotation_path, "wt", encoding="utf-8") as stream:
+        for row in annotation_rows:
+            stream.write(json.dumps(row) + "\n")
+    changed_annotation = visualize_paths(
+        parse_args(
+            [
+                "--input-path",
+                str(input_path),
+                "--annotation-path",
+                str(annotation_dir),
+                "--output-dir",
+                str(output_dir),
+                "--workers",
+                "1",
+                "--max-scenarios",
+                "1",
+            ]
+        )
+    )
+    assert changed_annotation["images_written"] == 1
+    assert changed_annotation["images_skipped"] == 0
+
     image_paths[0].write_bytes(b"")
     repaired = visualize_paths(
         parse_args(
@@ -204,3 +237,48 @@ def test_visualization_loads_only_annotation_shards_it_reaches(tmp_path):
         assert [
             row["scenario_id"] for row in csv.DictReader(stream)
         ] == ["scenario-a"]
+
+
+def test_visualization_rejects_old_annotation_row_schema(tmp_path):
+    input_path = tmp_path / "training.tfrecord-00000-of-00001"
+    write_tfrecord(
+        input_path,
+        [make_scenario("scenario-a", frame_count=11).SerializeToString()],
+    )
+    annotation_dir = tmp_path / "annotations"
+    annotate_paths(
+        parse_annotate_args(
+            [
+                "--input-path",
+                str(input_path),
+                "--output-dir",
+                str(annotation_dir),
+            ]
+        )
+    )
+    annotation_path = next(
+        annotation_dir.glob("*.map-annotations.jsonl.gz")
+    )
+    with gzip.open(annotation_path, "rt", encoding="utf-8") as stream:
+        row = json.loads(next(stream))
+    row["schema_version"] = "ego-map-annotation-old"
+    with gzip.open(annotation_path, "wt", encoding="utf-8") as stream:
+        stream.write(json.dumps(row) + "\n")
+
+    with pytest.raises(ValueError, match="Incompatible annotation schema"):
+        visualize_paths(
+            parse_args(
+                [
+                    "--input-path",
+                    str(input_path),
+                    "--annotation-path",
+                    str(annotation_dir),
+                    "--output-dir",
+                    str(tmp_path / "visualizations"),
+                    "--workers",
+                    "1",
+                    "--max-scenarios",
+                    "1",
+                ]
+            )
+        )

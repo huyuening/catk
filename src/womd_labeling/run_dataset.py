@@ -19,7 +19,10 @@ from .artifacts import (
     artifact_matches,
     stable_fingerprint,
 )
-from .map_annotation import MapAnnotationConfig
+from .map_annotation import (
+    MAP_ANNOTATION_SCHEMA_VERSION,
+    MapAnnotationConfig,
+)
 from .plot_statistics import (
     AGGREGATE_SCHEMA_VERSION,
     DEFAULT_FIGURE_WIDTH_CM,
@@ -137,6 +140,8 @@ def _annotation_outputs_complete(
     except (OSError, json.JSONDecodeError):
         return None
     if payload.get("input_files") != [str(path) for path in input_paths]:
+        return None
+    if payload.get("schema_version") != MAP_ANNOTATION_SCHEMA_VERSION:
         return None
     config = payload.get("config")
     if (

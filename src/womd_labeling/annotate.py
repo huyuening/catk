@@ -724,7 +724,10 @@ def annotate_paths(args: argparse.Namespace) -> dict:
                                 source_fingerprints[path],
                             )
                             pending[future] = record_index
-                            if len(pending) >= args.workers * 3:
+                            while (
+                                len(pending) + len(result_buffer)
+                                >= args.workers * 3
+                            ):
                                 next_write_index = drain_one(
                                     pending,
                                     output,

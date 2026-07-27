@@ -50,6 +50,7 @@ from .artifacts import (
     artifact_identity_record,
     stable_fingerprint,
 )
+from .map_annotation import MAP_ANNOTATION_SCHEMA_VERSION
 from .map_annotation_visualization import (
     DEFAULT_MAP_FRAME_INDEX,
     MapVisualizationConfig,
@@ -226,6 +227,11 @@ def load_annotation_shard(
             if not line.strip():
                 continue
             record = json.loads(line)
+            if record.get("schema_version") != MAP_ANNOTATION_SCHEMA_VERSION:
+                raise ValueError(
+                    f"Incompatible annotation schema in {path} at line "
+                    f"{line_number}: {record.get('schema_version')!r}"
+                )
             source_file = record.get("source_file")
             if source_file != expected_source_file:
                 raise ValueError(
@@ -317,6 +323,8 @@ def _visualization_fingerprint(
             "schema_version": "catk-womd-scenario-visualization-v1",
             "scenario_id": annotation.get("scenario_id"),
             "scenario_index": annotation.get("scenario_index"),
+            "annotation_schema_version": annotation.get("schema_version"),
+            "annotation_fingerprint": stable_fingerprint(annotation),
             "annotation_config_fingerprint": annotation.get(
                 "annotation_config_fingerprint"
             ),

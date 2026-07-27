@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import json
 import os
+import time
 
 import pytest
 
+from src.womd_labeling import annotate as annotate_module
 from src.womd_labeling.annotate import (
     annotate_paths,
     output_path_for,
@@ -143,3 +146,73 @@ def test_resume_rejects_changed_source_identity(tmp_path):
 
     with pytest.raises(ValueError, match="cannot be resumed"):
         annotate_paths(_args(input_path, output_dir))
+
+
+def test_parallel_annotation_uses_bounded_ordered_window(
+    tmp_path,
+    monkeypatch,
+):
+    scenario_count = 24
+    input_path = tmp_path / "training.tfrecord-00000-of-00001"
+    write_tfrecord(
+        input_path,
+        [
+            make_scenario(f"scenario-{index}").SerializeToString()
+            for index in range(scenario_count)
+        ],
+    )
+    output_dir = tmp_path / "labels"
+    original_process_record = annotate_module.process_record
+
+    class TrackedResult(dict):
+        live = 0
+        max_live = 0
+
+        def __init__(self, payload):
+            super().__init__(payload)
+            type(self).live += 1
+            type(self).max_live = max(
+                type(self).max_live,
+                type(self).live,
+            )
+
+        def __del__(self):
+            type(self).live -= 1
+
+    def delayed_process_record(*args):
+        if args[2] == 0:
+            time.sleep(0.15)
+        return TrackedResult(original_process_record(*args))
+
+    monkeypatch.setattr(
+        annotate_module,
+        "ProcessPoolExecutor",
+        ThreadPoolExecutor,
+    )
+    monkeypatch.setattr(
+        annotate_module,
+        "process_record",
+        delayed_process_record,
+    )
+
+    annotate_paths(
+        parse_args(
+            [
+                "--input-path",
+                str(input_path),
+                "--output-dir",
+                str(output_dir),
+                "--workers",
+                "2",
+            ]
+        )
+    )
+
+    output_path = output_path_for(input_path, output_dir, "gzip")
+    with gzip.open(output_path, "rt", encoding="utf-8") as stream:
+        assert [
+            json.loads(line)["scenario_id"] for line in stream
+        ] == [
+            f"scenario-{index}" for index in range(scenario_count)
+        ]
+    assert TrackedResult.max_live <= 6

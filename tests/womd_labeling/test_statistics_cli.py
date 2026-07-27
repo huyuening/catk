@@ -190,7 +190,55 @@ def test_rebuilds_split_summary_from_completed_shards(tmp_path, monkeypatch):
     ).startswith("scope,")
 
 
+def test_recomputes_later_shard_when_global_offset_changes(tmp_path):
+    input_dir = tmp_path / "training"
+    input_dir.mkdir()
+    first_path = input_dir / "training.tfrecord-00000-of-00002"
+    second_path = input_dir / "training.tfrecord-00001-of-00002"
+    write_tfrecord(
+        first_path,
+        [make_scenario("scenario-0", frame_count=11).SerializeToString()],
+    )
+    write_tfrecord(
+        second_path,
+        [make_scenario("scenario-1", frame_count=11).SerializeToString()],
+    )
+    output_dir = tmp_path / "statistics"
+    run_statistics(_args(input_dir, output_dir))
+    second_detail = next(
+        (output_dir / "shards").glob(
+            "00001-*.current-frame-road-types.csv.gz"
+        )
+    )
+    with gzip.open(
+        second_detail,
+        "rt",
+        encoding="utf-8",
+        newline="",
+    ) as stream:
+        assert next(csv.DictReader(stream))["global_index"] == "1"
+
+    write_tfrecord(
+        first_path,
+        [
+            make_scenario("scenario-0", frame_count=11).SerializeToString(),
+            make_scenario("scenario-added", frame_count=11).SerializeToString(),
+        ],
+    )
+    resumed = run_statistics(_args(input_dir, output_dir))
+
+    assert resumed["aggregate"]["scenarios"] == 3
+    with gzip.open(
+        second_detail,
+        "rt",
+        encoding="utf-8",
+        newline="",
+    ) as stream:
+        assert next(csv.DictReader(stream))["global_index"] == "2"
+
+
 def test_parallel_statistics_preserves_scenario_order(tmp_path, monkeypatch):
+    scenario_count = 24
     input_path = tmp_path / "training.tfrecord-00000-of-00001"
     write_tfrecord(
         input_path,
@@ -199,15 +247,31 @@ def test_parallel_statistics_preserves_scenario_order(tmp_path, monkeypatch):
                 f"scenario-{index}",
                 frame_count=11,
             ).SerializeToString()
-            for index in range(3)
+            for index in range(scenario_count)
         ],
     )
     output_dir = tmp_path / "statistics"
     original_process_scenario = statistics_module.process_scenario
 
+    class TrackedResult(dict):
+        live = 0
+        max_live = 0
+
+        def __init__(self, payload):
+            super().__init__(payload)
+            type(self).live += 1
+            type(self).max_live = max(
+                type(self).max_live,
+                type(self).live,
+            )
+
+        def __del__(self):
+            type(self).live -= 1
+
     def delayed_process_scenario(*args):
-        time.sleep((2 - args[2]) * 0.01)
-        return original_process_scenario(*args)
+        if args[2] == 0:
+            time.sleep(0.15)
+        return TrackedResult(original_process_scenario(*args))
 
     monkeypatch.setattr(
         statistics_module,
@@ -244,7 +308,10 @@ def test_parallel_statistics_preserves_scenario_order(tmp_path, monkeypatch):
     ) as stream:
         assert [
             row["scenario_id"] for row in csv.DictReader(stream)
-        ] == ["scenario-0", "scenario-1", "scenario-2"]
+        ] == [
+            f"scenario-{index}" for index in range(scenario_count)
+        ]
+    assert TrackedResult.max_live <= 6
 
 
 def test_recovers_when_split_manifest_publish_is_interrupted(
