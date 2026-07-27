@@ -25,7 +25,7 @@ class Pt:
 
     def to_dict(self) -> dict:
         return {"x": self.x, "y": self.y, "z": self.z}
-    
+
     def to_list(self) -> list[float]:
         return [self.x, self.y, self.z]
 

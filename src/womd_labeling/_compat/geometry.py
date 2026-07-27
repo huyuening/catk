@@ -201,12 +201,12 @@ def interpolate(coords: list[tuple], length: float, step: float = 0.5) -> list[t
 
 def calculate_turning_angle(points):
     """in radians"""
-    
+
     vectors = np.diff(points, axis=0)
     angles = np.arctan2(vectors[:, 1], vectors[:, 0])
     angle_diffs = np.diff(angles)
     angle_diffs = (angle_diffs + np.pi) % (2 * np.pi) - np.pi
-    
+
     total_turning_angle = np.sum(angle_diffs)
 
     return total_turning_angle
