@@ -96,6 +96,43 @@ def get_prob_targets_spatial_aware_smoothing(
 
 
 @torch.no_grad()
+def get_prob_targets_trajtok_original(
+    gt_idx: Tensor,  # [n_agent, n_step]
+    token_traj: Tensor,  # [n_agent, n_token, 4, 2]
+    label_smoothing: float,
+) -> Tensor:  # [n_agent, n_step, n_token]
+    gt_token_traj = torch.gather(
+        token_traj,
+        dim=1,
+        index=gt_idx.unsqueeze(-1)
+        .unsqueeze(-1)
+        .expand(-1, -1, 4, 2),
+    )
+    dists = torch.norm(
+        gt_token_traj[:, :, None, :, :]
+        - token_traj[:, None, :, :, :],
+        dim=-1,
+    ).mean(-1)
+    closest_token_mask = one_hot(
+        gt_idx,
+        num_classes=token_traj.shape[1],
+    ).bool()
+    prob_target = torch.zeros(
+        gt_idx.shape[0],
+        gt_idx.shape[1],
+        token_traj.shape[1],
+        device=gt_idx.device,
+    )
+    prob_target[closest_token_mask] = 1.0 - label_smoothing
+    proj = 1.0 / ((0.0001 + dists) ** 2)
+    proj = proj * (~closest_token_mask).int()
+    proj_sum = proj.sum(dim=-1, keepdim=True)
+    proj = proj / proj_sum
+    prob_target += proj / proj_sum * label_smoothing
+    return prob_target
+
+
+@torch.no_grad()
 def get_euclidean_targets(
     pred_pos: Tensor,  # [n_agent, 18, 2]
     pred_head: Tensor,  # [n_agent, 18]

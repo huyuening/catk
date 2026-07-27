@@ -35,6 +35,13 @@ get_prob_targets_spatial_aware_smoothing = (
 )
 
 
+def _get_trajtok_original_helper():
+    return getattr(
+        METRIC_UTILS,
+        "get_prob_targets_trajtok_original",
+    )
+
+
 def _load_cross_entropy():
     if importlib.util.find_spec("torchmetrics") is None:
         return None
@@ -182,6 +189,74 @@ class SpatialAwareTargetTest(unittest.TestCase):
                         token_traj=token_traj,
                         label_smoothing=value,
                     )
+
+
+class TrajTokOriginalTargetTest(unittest.TestCase):
+    def test_matches_trajtok_5920c89_reference_fixture(self):
+        token_traj = SpatialAwareTargetTest._contours(
+            [0.0, 1.0, 4.0]
+        )
+
+        probability = _get_trajtok_original_helper()(
+            gt_idx=torch.tensor([[0]], dtype=torch.long),
+            token_traj=token_traj,
+            label_smoothing=0.1,
+        )
+
+        expected = torch.tensor(
+            [[[0.9, 0.0885974765, 0.00553817255]]],
+            dtype=torch.float32,
+        )
+        self.assertTrue(torch.allclose(probability, expected))
+
+    def test_retains_second_division_and_non_unit_mass(self):
+        token_traj = SpatialAwareTargetTest._contours(
+            [0.0, 1.0, 4.0]
+        )
+
+        probability = _get_trajtok_original_helper()(
+            gt_idx=torch.tensor([[0]], dtype=torch.long),
+            token_traj=token_traj,
+            label_smoothing=0.1,
+        )
+
+        self.assertAlmostEqual(
+            float(probability.sum()),
+            0.9941356182,
+            places=6,
+        )
+        self.assertFalse(
+            torch.allclose(probability.sum(), torch.tensor(1.0))
+        )
+
+    def test_selected_gt_idx_changes_spatial_center(self):
+        token_traj = SpatialAwareTargetTest._contours(
+            [0.0, 1.0, 4.0]
+        )
+        helper = _get_trajtok_original_helper()
+
+        centered_at_zero = helper(
+            torch.tensor([[0]]),
+            token_traj,
+            0.1,
+        )
+        centered_at_one = helper(
+            torch.tensor([[1]]),
+            token_traj,
+            0.1,
+        )
+
+        self.assertAlmostEqual(
+            float(centered_at_zero[0, 0, 0]),
+            0.9,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(centered_at_one[0, 0, 1]),
+            0.9,
+            places=6,
+        )
+        self.assertFalse(torch.equal(centered_at_zero, centered_at_one))
 
 
 @unittest.skipIf(
