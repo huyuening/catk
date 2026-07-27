@@ -63,6 +63,12 @@ Jan. 2025
 - Download the [Waymo Open Motion Dataset](https://waymo.com/open/download/). We use v1.2.1.
 - Use [scripts/cache_womd.sh](scripts/cache_womd.sh) to preprocess the dataset into pickle files to accelerate data loading during the training and evaluation.
 - You should pack three datasets: `training`, `validation` and `testing`.
+- Raw WOMD road/agent/action labeling and dataset-level visualization are
+  available through
+  [scripts/label_womd_dataset.sh](scripts/label_womd_dataset.sh). See the
+  [WOMD labeling and visualization guide](docs/womd-labeling.md) for full
+  training/validation/testing runs, resume behavior, output schemas, and
+  per-scenario rendering.
 
 ### Vocabulary-only trajectory reconstruction
 

@@ -9,6 +9,9 @@ scipy==1.14.1 # BSD 3-Clause License: https://github.com/scipy/scipy/blob/main/L
 
 # visualization
 opencv-python-headless==4.10.0.84 # MIT License: https://github.com/opencv/opencv-python/blob/master/LICENSE.txt
+matplotlib==3.9.2 # PSF-based License: https://matplotlib.org/stable/project/license.html
+shapely==2.0.6 # BSD 3-Clause License: https://github.com/shapely/shapely/blob/main/LICENSE.txt
+tqdm==4.66.5 # MPL 2.0 / MIT License: https://github.com/tqdm/tqdm/blob/master/LICENCE
 
 # for waymo dataset
 tensorboard==2.12.3 # Apache License 2.0: https://github.com/tensorflow/tensorboard/blob/master/LICENSE
