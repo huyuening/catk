@@ -42,26 +42,53 @@ def _get_trajtok_original_helper():
     )
 
 
+def _install_torchmetrics_stub():
+    torchmetrics_module = types.ModuleType("torchmetrics")
+    metric_module = types.ModuleType("torchmetrics.metric")
+
+    class Metric(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+
+        def add_state(self, name, default, dist_reduce_fx=None):
+            self.register_buffer(name, default.clone())
+
+        def forward(self, *args, **kwargs):
+            self.update(*args, **kwargs)
+            return self.compute()
+
+    metric_module.Metric = Metric
+    torchmetrics_module.metric = metric_module
+    sys.modules["torchmetrics"] = torchmetrics_module
+    sys.modules["torchmetrics.metric"] = metric_module
+
+
 def _load_cross_entropy():
-    if importlib.util.find_spec("torchmetrics") is None:
-        return None
+    using_stub = importlib.util.find_spec("torchmetrics") is None
+    if using_stub:
+        _install_torchmetrics_stub()
 
-    package_name = "catk_test_metrics"
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(ROOT / "src/smart/metrics")]
-    sys.modules[package_name] = package
+    try:
+        package_name = "catk_test_metrics"
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(ROOT / "src/smart/metrics")]
+        sys.modules[package_name] = package
 
-    for module_name in ("utils", "cross_entropy"):
-        qualified_name = f"{package_name}.{module_name}"
-        spec = importlib.util.spec_from_file_location(
-            qualified_name,
-            ROOT / f"src/smart/metrics/{module_name}.py",
-        )
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[qualified_name] = module
-        spec.loader.exec_module(module)
+        for module_name in ("utils", "cross_entropy"):
+            qualified_name = f"{package_name}.{module_name}"
+            spec = importlib.util.spec_from_file_location(
+                qualified_name,
+                ROOT / f"src/smart/metrics/{module_name}.py",
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[qualified_name] = module
+            spec.loader.exec_module(module)
 
-    return sys.modules[f"{package_name}.cross_entropy"].CrossEntropy
+        return sys.modules[f"{package_name}.cross_entropy"].CrossEntropy
+    finally:
+        if using_stub:
+            sys.modules.pop("torchmetrics.metric", None)
+            sys.modules.pop("torchmetrics", None)
 
 
 CrossEntropy = _load_cross_entropy()
@@ -259,19 +286,19 @@ class TrajTokOriginalTargetTest(unittest.TestCase):
         self.assertFalse(torch.equal(centered_at_zero, centered_at_one))
 
 
-@unittest.skipIf(
-    CrossEntropy is None,
-    "torchmetrics is not installed in this Python environment",
-)
 class CrossEntropySelectionTest(unittest.TestCase):
     @staticmethod
-    def _metric(spatial_aware_smoothing):
+    def _metric(
+        spatial_aware_smoothing,
+        spatial_aware_smoothing_mode="raw_gt_normalized",
+    ):
         metric = CrossEntropy(
             use_gt_raw=True,
             gt_thresh_scale_length=-1.0,
             label_smoothing=0.1,
             rollout_as_gt=False,
             spatial_aware_smoothing=spatial_aware_smoothing,
+            spatial_aware_smoothing_mode=spatial_aware_smoothing_mode,
         )
         metric.eval()
         return metric
@@ -307,6 +334,7 @@ class CrossEntropySelectionTest(unittest.TestCase):
             "gt_valid": valid_18,
             "token_agent_shape": token_agent_shape,
             "token_traj": token_traj,
+            "gt_idx": torch.zeros(n_agent, n_step, dtype=torch.long),
         }
 
     @classmethod
@@ -356,6 +384,49 @@ class CrossEntropySelectionTest(unittest.TestCase):
             label_smoothing=0.1,
         ).mean()
         self.assertTrue(torch.allclose(metric.compute(), expected))
+
+    def test_trajtok_original_mode_uses_original_soft_target(self):
+        metric = self._metric(
+            spatial_aware_smoothing=True,
+            spatial_aware_smoothing_mode="trajtok_original",
+        )
+        inputs = self._inputs()
+
+        metric.update(**inputs)
+
+        probability = torch.tensor(
+            [0.9, 0.0885974765, 0.00553817255],
+            dtype=torch.float32,
+        ).view(1, 1, 3)
+        probability = probability.expand(1, 16, 3)
+        expected = torch.nn.functional.cross_entropy(
+            inputs["next_token_logits"].transpose(1, 2),
+            probability.transpose(1, 2),
+            reduction="none",
+            label_smoothing=0.0,
+        ).mean()
+        self.assertTrue(torch.allclose(metric.compute(), expected))
+
+    def test_trajtok_original_mode_requires_gt_idx(self):
+        metric = self._metric(
+            spatial_aware_smoothing=True,
+            spatial_aware_smoothing_mode="trajtok_original",
+        )
+        inputs = self._inputs()
+        inputs.pop("gt_idx")
+
+        with self.assertRaisesRegex(ValueError, "gt_idx"):
+            metric.update(**inputs)
+
+    def test_unknown_spatial_mode_is_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "spatial_aware_smoothing_mode",
+        ):
+            self._metric(
+                spatial_aware_smoothing=True,
+                spatial_aware_smoothing_mode="unknown",
+            )
 
 
 class SpatialAwareConfigTest(unittest.TestCase):

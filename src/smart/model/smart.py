@@ -120,6 +120,7 @@ class SMART(LightningModule):
             **pred,
             token_agent_shape=tokenized_agent["token_agent_shape"],  # [n_agent, 2]
             token_traj=tokenized_agent["token_traj"],  # [n_agent, n_token, 4, 2]
+            gt_idx=tokenized_agent["gt_idx"][:, 2:],  # [n_agent, 16]
             train_mask=data["agent"]["train_mask"],  # [n_agent]
             current_epoch=self.current_epoch,
         )
@@ -137,6 +138,7 @@ class SMART(LightningModule):
                 **pred,
                 token_agent_shape=tokenized_agent["token_agent_shape"],  # [n_agent, 2]
                 token_traj=tokenized_agent["token_traj"],  # [n_agent, n_token, 4, 2]
+                gt_idx=tokenized_agent["gt_idx"][:, 2:],  # [n_agent, 16]
             )
 
             self.TokenCls.update(

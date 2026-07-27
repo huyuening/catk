@@ -22,6 +22,7 @@ from .utils import (
     get_euclidean_targets,
     get_prob_targets,
     get_prob_targets_spatial_aware_smoothing,
+    get_prob_targets_trajtok_original,
 )
 
 
@@ -38,6 +39,7 @@ class CrossEntropy(Metric):
         label_smoothing: float,
         rollout_as_gt: bool,
         spatial_aware_smoothing: bool = False,
+        spatial_aware_smoothing_mode: str = "raw_gt_normalized",
     ) -> None:
         super().__init__()
         if not 0.0 <= label_smoothing < 1.0:
@@ -45,11 +47,22 @@ class CrossEntropy(Metric):
                 "label_smoothing must satisfy 0 <= label_smoothing < 1, "
                 f"got {label_smoothing}"
             )
+        valid_spatial_modes = {
+            "raw_gt_normalized",
+            "trajtok_original",
+        }
+        if spatial_aware_smoothing_mode not in valid_spatial_modes:
+            raise ValueError(
+                "spatial_aware_smoothing_mode must be one of "
+                f"{sorted(valid_spatial_modes)}, got "
+                f"{spatial_aware_smoothing_mode!r}"
+            )
         self.use_gt_raw = use_gt_raw
         self.gt_thresh_scale_length = gt_thresh_scale_length
         self.label_smoothing = label_smoothing
         self.rollout_as_gt = rollout_as_gt
         self.spatial_aware_smoothing = spatial_aware_smoothing
+        self.spatial_aware_smoothing_mode = spatial_aware_smoothing_mode
         self.add_state("loss_sum", default=tensor(0.0), dist_reduce_fx="sum")
         self.add_state("count", default=tensor(0.0), dist_reduce_fx="sum")
 
@@ -73,6 +86,7 @@ class CrossEntropy(Metric):
         # ! for tokenization
         token_agent_shape: Tensor,  # [n_agent, 2]
         token_traj: Tensor,  # [n_agent, n_token, 4, 2]
+        gt_idx: Optional[Tensor] = None,  # [n_agent, 16]
         # ! for filtering intersting agent for training
         train_mask: Optional[Tensor] = None,  # [n_agent]
         # ! for rollout_as_gt
@@ -104,12 +118,24 @@ class CrossEntropy(Metric):
             euclidean_target = next_token_action
 
         if self.spatial_aware_smoothing:
-            prob_target = get_prob_targets_spatial_aware_smoothing(
-                target=euclidean_target,  # [n_agent, n_step, 3] x,y,yaw in local
-                token_agent_shape=token_agent_shape,  # [n_agent, 2]
-                token_traj=token_traj,  # [n_agent, n_token, 4, 2]
-                label_smoothing=self.label_smoothing,
-            )
+            if self.spatial_aware_smoothing_mode == "trajtok_original":
+                if gt_idx is None:
+                    raise ValueError(
+                        "gt_idx is required when "
+                        "spatial_aware_smoothing_mode='trajtok_original'"
+                    )
+                prob_target = get_prob_targets_trajtok_original(
+                    gt_idx=gt_idx,
+                    token_traj=token_traj,
+                    label_smoothing=self.label_smoothing,
+                )
+            else:
+                prob_target = get_prob_targets_spatial_aware_smoothing(
+                    target=euclidean_target,
+                    token_agent_shape=token_agent_shape,
+                    token_traj=token_traj,
+                    label_smoothing=self.label_smoothing,
+                )
             builtin_label_smoothing = 0.0
         else:
             prob_target = get_prob_targets(
