@@ -108,4 +108,5 @@ model_config:
     label_smoothing: 0.1
     rollout_as_gt: false
     spatial_aware_smoothing: false
+    spatial_aware_smoothing_mode: raw_gt_normalized
   finetune: false

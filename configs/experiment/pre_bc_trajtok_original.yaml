@@ -1,0 +1,11 @@
+# @package _global_
+
+# CatK pre-BC with the original TrajTok spatial-smoothing formula.
+defaults:
+  - pre_bc
+  - _self_
+
+model:
+  model_config:
+    training_loss:
+      spatial_aware_smoothing_mode: trajtok_original

@@ -443,6 +443,59 @@ class SpatialAwareConfigTest(unittest.TestCase):
             ]
         )
 
+    def test_base_defaults_to_current_raw_gt_mode(self):
+        config = self._load("configs/model/smart.yaml")
+        self.assertEqual(
+            config["model_config"]["training_loss"][
+                "spatial_aware_smoothing_mode"
+            ],
+            "raw_gt_normalized",
+        )
+
+    def test_trajtok_original_experiment_only_overrides_mode(self):
+        config = self._load(
+            "configs/experiment/pre_bc_trajtok_original.yaml"
+        )
+        self.assertEqual(config["defaults"], ["pre_bc", "_self_"])
+        self.assertEqual(
+            config["model"]["model_config"]["training_loss"],
+            {"spatial_aware_smoothing_mode": "trajtok_original"},
+        )
+
+    def test_trajtok_original_and_clsft_experiments_compose(self):
+        try:
+            import hydra
+        except ModuleNotFoundError:
+            self.skipTest("Hydra is not installed in this test environment")
+
+        with hydra.initialize_config_dir(
+            config_dir=str(ROOT / "configs"),
+            version_base=None,
+        ):
+            pre_bc_config = hydra.compose(
+                config_name="run.yaml",
+                overrides=["experiment=pre_bc_trajtok_original"],
+            )
+            clsft_config = hydra.compose(
+                config_name="run.yaml",
+                overrides=["experiment=clsft"],
+            )
+
+        pre_bc_loss = pre_bc_config.model.model_config.training_loss
+        self.assertTrue(pre_bc_loss.spatial_aware_smoothing)
+        self.assertEqual(
+            pre_bc_loss.spatial_aware_smoothing_mode,
+            "trajtok_original",
+        )
+        self.assertEqual(pre_bc_loss.label_smoothing, 0.1)
+
+        clsft_loss = clsft_config.model.model_config.training_loss
+        self.assertFalse(clsft_loss.spatial_aware_smoothing)
+        self.assertEqual(
+            clsft_loss.spatial_aware_smoothing_mode,
+            "raw_gt_normalized",
+        )
+
     def test_history_dynamics_inherits_pre_bc(self):
         config = self._load(
             "configs/experiment/pre_bc_history_dynamics.yaml"
@@ -452,17 +505,16 @@ class SpatialAwareConfigTest(unittest.TestCase):
     def test_base_and_clsft_keep_spatial_smoothing_disabled(self):
         base = self._load("configs/model/smart.yaml")
         clsft = self._load("configs/experiment/clsft.yaml")
+        base_loss = base["model_config"]["training_loss"]
+        clsft_loss = clsft["model"]["model_config"]["training_loss"]
 
-        self.assertFalse(
-            base["model_config"]["training_loss"][
-                "spatial_aware_smoothing"
-            ]
+        self.assertFalse(base_loss["spatial_aware_smoothing"])
+        self.assertEqual(
+            base_loss["spatial_aware_smoothing_mode"],
+            "raw_gt_normalized",
         )
-        self.assertFalse(
-            clsft["model"]["model_config"]["training_loss"][
-                "spatial_aware_smoothing"
-            ]
-        )
+        self.assertFalse(clsft_loss["spatial_aware_smoothing"])
+        self.assertNotIn("spatial_aware_smoothing_mode", clsft_loss)
 
 
 if __name__ == "__main__":
