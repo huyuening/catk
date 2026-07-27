@@ -6,6 +6,8 @@ import pytest
 
 from src.womd_labeling import run_dataset as runner
 
+from .helpers import make_scenario, write_tfrecord
+
 
 def _touch_split(root, split):
     directory = root / split
@@ -57,6 +59,21 @@ def test_routes_each_split_to_isolated_stage_outputs(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run_statistics", fake_statistics)
     monkeypatch.setattr(runner, "visualize_paths", fake_scenarios)
     monkeypatch.setattr(runner, "plot_statistics", fake_aggregate)
+    monkeypatch.setattr(
+        runner,
+        "_require_annotation_outputs",
+        lambda *_: {},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_require_statistics_outputs",
+        lambda *_: {},
+    )
+    monkeypatch.setattr(
+        runner,
+        "resolve_annotation_paths",
+        lambda *_: [],
+    )
 
     summary = runner.run_dataset(
         runner.parse_args(
@@ -81,13 +98,16 @@ def test_routes_each_split_to_isolated_stage_outputs(tmp_path, monkeypatch):
         assert calls["annotations"][index].output_dir == (
             output_root / "annotations" / split
         ).resolve()
+        assert calls["annotations"][index].resume is True
         assert calls["statistics"][index].output_dir == (
             output_root / "statistics" / split
         ).resolve()
+        assert calls["statistics"][index].resume is True
         assert calls["scenario_visualizations"][index].output_dir == (
             output_root / "visualizations" / "scenarios" / split
         ).resolve()
         assert calls["scenario_visualizations"][index].max_scenarios is None
+        assert calls["scenario_visualizations"][index].resume is True
         assert calls["aggregate_visualization"][index].output_prefix == (
             output_root / "visualizations" / "aggregate" / split
         ).resolve()
@@ -151,3 +171,64 @@ def test_rejects_duplicate_splits_and_negative_visualization_limit(tmp_path):
     )
     with pytest.raises(ValueError, match="non-negative"):
         runner.run_dataset(args)
+
+
+def test_visualization_stage_requires_compatible_annotations(tmp_path):
+    input_root = tmp_path / "raw"
+    _touch_split(input_root, "training")
+
+    with pytest.raises(RuntimeError, match="annotations stage"):
+        runner.run_dataset(
+            runner.parse_args(
+                [
+                    "--input-root",
+                    str(input_root),
+                    "--output-root",
+                    str(tmp_path / "labels"),
+                    "--splits",
+                    "training",
+                    "--stages",
+                    "scenario-visualizations",
+                ]
+            )
+        )
+
+
+def test_real_one_scenario_pipeline_resumes_all_stages(tmp_path):
+    input_root = tmp_path / "raw"
+    training_dir = input_root / "training"
+    training_dir.mkdir(parents=True)
+    write_tfrecord(
+        training_dir / "training.tfrecord-00000-of-00001",
+        [make_scenario("scenario-a", frame_count=11).SerializeToString()],
+    )
+    output_root = tmp_path / "labels"
+    args = runner.parse_args(
+        [
+            "--input-root",
+            str(input_root),
+            "--output-root",
+            str(output_root),
+            "--splits",
+            "training",
+            "--workers",
+            "1",
+            "--visualize-max-scenarios",
+            "1",
+            "--visualize-dpi",
+            "72",
+            "--aggregate-dpi",
+            "72",
+        ]
+    )
+
+    first = runner.run_dataset(args)
+    resumed = runner.run_dataset(args)
+
+    assert first["status"] == "complete"
+    assert resumed["status"] == "complete"
+    stages = resumed["splits"]["training"]["stages"]
+    assert stages["annotations"]["shards_skipped"] == 1
+    assert stages["statistics"]["resumed"] is True
+    assert stages["scenario-visualizations"]["images_skipped"] == 1
+    assert stages["aggregate-visualization"]["resumed"] is True

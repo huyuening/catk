@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.womd_labeling import run_dataset as dataset_runner
 from src.womd_labeling.annotate import annotate_paths
 from src.womd_labeling.annotate import parse_args as parse_annotate_args
 from src.womd_labeling.plot_statistics import parse_args, plot_statistics
@@ -43,6 +44,8 @@ def test_generates_all_aggregate_visualization_formats(tmp_path):
             ]
         )
     )
+    for detail_path in (statistics_dir / "shards").glob("*.csv.gz"):
+        detail_path.unlink()
     output_prefix = tmp_path / "aggregate" / "womd_labels"
 
     summary = plot_statistics(
@@ -69,4 +72,34 @@ def test_generates_all_aggregate_visualization_formats(tmp_path):
         assert path.stat().st_size > 0
     counts_path = output_prefix.with_name(output_prefix.name + "_counts.csv")
     assert counts_path.is_file()
+    manifest_path = output_prefix.with_name(
+        output_prefix.name + ".summary.json"
+    )
+    assert manifest_path.is_file()
+    assert summary["output_files"]["summary"] == str(manifest_path)
+    assert set(summary["output_artifacts"]) == {
+        "png",
+        "pdf",
+        "svg",
+        "counts",
+    }
+    annotation_paths = sorted(
+        annotation_dir.glob("*.map-annotations.jsonl.gz")
+    )
+    assert dataset_runner._aggregate_outputs_complete(
+        output_prefix,
+        statistics_dir,
+        annotation_paths,
+        dpi=72,
+    ) is not None
+    counts_path.write_text(
+        counts_path.read_text(encoding="utf-8") + "tampered\n",
+        encoding="utf-8",
+    )
+    assert dataset_runner._aggregate_outputs_complete(
+        output_prefix,
+        statistics_dir,
+        annotation_paths,
+        dpi=72,
+    ) is None
     assert not list((tmp_path / "aggregate").glob("*.partial"))

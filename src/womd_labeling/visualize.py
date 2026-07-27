@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import csv
+from dataclasses import asdict
 import glob
 import gzip
 import json
@@ -44,6 +45,11 @@ except ImportError:
             )
 
 
+from .artifacts import (
+    artifact_identity_matches,
+    artifact_identity_record,
+    stable_fingerprint,
+)
 from .map_annotation_visualization import (
     DEFAULT_MAP_FRAME_INDEX,
     MapVisualizationConfig,
@@ -137,6 +143,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace PNG files that already exist.",
     )
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Reuse validated existing PNG files. Enabled by default; "
+            "--overwrite takes precedence."
+        ),
+    )
     return parser
 
 
@@ -168,29 +183,79 @@ def _open_annotation(path: Path) -> TextIO:
     return path.open("r", encoding="utf-8")
 
 
-def load_annotations(paths: Iterable[Path]) -> dict[str, dict]:
-    annotations = {}
+def annotation_source_file(path: Path) -> str:
+    """Infer the TFRecord basename from an annotation shard filename."""
+    for suffix in (
+        ".map-annotations.jsonl.gz",
+        ".map-annotations.jsonl",
+    ):
+        if path.name.endswith(suffix):
+            source_file = path.name[: -len(suffix)]
+            if source_file:
+                return source_file
+    raise ValueError(
+        "Annotation shard name must end with "
+        f"'.map-annotations.jsonl[.gz]': {path}"
+    )
+
+
+def index_annotation_paths(paths: Iterable[Path]) -> dict[str, Path]:
+    """Map source TFRecord basenames to annotation shards without reading them."""
+    indexed = {}
     for path in paths:
-        with _open_annotation(path) as stream:
-            for line_number, line in enumerate(stream, start=1):
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                if record.get("error"):
-                    continue
-                scenario_id = record.get("scenario_id")
-                if not scenario_id:
-                    raise ValueError(
-                        f"Missing scenario_id in {path} at line {line_number}"
-                    )
-                if scenario_id in annotations:
-                    raise ValueError(
-                        f"Duplicate scenario_id {scenario_id!r} in annotation files"
-                    )
-                annotations[scenario_id] = record
-    if not annotations:
-        raise ValueError("Annotation inputs did not contain successful scenarios")
-    return annotations
+        source_file = annotation_source_file(path)
+        if source_file in indexed:
+            raise ValueError(
+                f"Duplicate annotation shards for source {source_file!r}: "
+                f"{indexed[source_file]} and {path}"
+            )
+        indexed[source_file] = path
+    return indexed
+
+
+def load_annotation_shard(
+    path: Path,
+    *,
+    expected_source_file: str,
+) -> tuple[dict[int, dict], dict[str, dict]]:
+    """Load one annotation shard, bounded by one TFRecord shard."""
+    by_index = {}
+    by_scenario_id = {}
+    with _open_annotation(path) as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            source_file = record.get("source_file")
+            if source_file != expected_source_file:
+                raise ValueError(
+                    f"Expected source_file {expected_source_file!r} in {path} "
+                    f"at line {line_number}, found {source_file!r}"
+                )
+            if record.get("error"):
+                continue
+            scenario_id = record.get("scenario_id")
+            if not scenario_id:
+                raise ValueError(
+                    f"Missing scenario_id in {path} at line {line_number}"
+                )
+            scenario_index = record.get("scenario_index")
+            if scenario_index is None:
+                raise ValueError(
+                    f"Missing scenario_index in {path} at line {line_number}"
+                )
+            scenario_index = int(scenario_index)
+            if scenario_index in by_index:
+                raise ValueError(
+                    f"Duplicate scenario_index {scenario_index} in {path}"
+                )
+            if scenario_id in by_scenario_id:
+                raise ValueError(
+                    f"Duplicate scenario_id {scenario_id!r} in {path}"
+                )
+            by_index[scenario_index] = record
+            by_scenario_id[scenario_id] = record
+    return by_index, by_scenario_id
 
 
 def _safe_id(scenario_id: str) -> str:
@@ -242,6 +307,68 @@ def _existing_result(
     )
 
 
+def _visualization_fingerprint(
+    annotation: dict,
+    preferred_frame_index: int,
+    config: MapVisualizationConfig,
+) -> str:
+    return stable_fingerprint(
+        {
+            "schema_version": "catk-womd-scenario-visualization-v1",
+            "scenario_id": annotation.get("scenario_id"),
+            "scenario_index": annotation.get("scenario_index"),
+            "annotation_config_fingerprint": annotation.get(
+                "annotation_config_fingerprint"
+            ),
+            "source_fingerprint": annotation.get("source_fingerprint"),
+            "preferred_frame_index": preferred_frame_index,
+            "visualization_config": asdict(config),
+        }
+    )
+
+
+def _sidecar_path(output_path: Path) -> Path:
+    return output_path.with_name(output_path.name + ".json")
+
+
+def _write_visualization_sidecar(
+    output_path: Path,
+    *,
+    fingerprint: str,
+) -> None:
+    sidecar_path = _sidecar_path(output_path)
+    partial_path = sidecar_path.with_name(sidecar_path.name + ".partial")
+    payload = {
+        "schema_version": "catk-womd-scenario-visualization-v1",
+        "fingerprint": fingerprint,
+        "image_artifact": artifact_identity_record(output_path),
+    }
+    partial_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    partial_path.replace(sidecar_path)
+
+
+def _visualization_is_reusable(
+    output_path: Path,
+    *,
+    fingerprint: str,
+) -> bool:
+    try:
+        payload = json.loads(
+            _sidecar_path(output_path).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        payload.get("schema_version")
+        == "catk-womd-scenario-visualization-v1"
+        and payload.get("fingerprint") == fingerprint
+        and artifact_identity_matches(payload.get("image_artifact"))
+    )
+
+
 def _render_payload_task(
     payload: bytes,
     annotation: dict,
@@ -285,18 +412,17 @@ def visualize_paths(args: argparse.Namespace) -> dict:
 
     input_paths = resolve_tfrecord_paths(args.input_path)
     annotation_paths = resolve_annotation_paths(args.annotation_path)
-    annotations = load_annotations(annotation_paths)
-    annotations_by_source_index = {
-        (
-            str(annotation["source_file"]),
-            int(annotation["scenario_index"]),
-        ): annotation
-        for annotation in annotations.values()
-        if (
-            annotation.get("source_file") is not None
-            and annotation.get("scenario_index") is not None
+    annotation_paths_by_source = index_annotation_paths(annotation_paths)
+    missing_annotation_sources = [
+        path.name
+        for path in input_paths
+        if path.name not in annotation_paths_by_source
+    ]
+    if missing_annotation_sources:
+        raise FileNotFoundError(
+            "Missing annotation shards for TFRecord sources: "
+            + ", ".join(missing_annotation_sources)
         )
-    }
     requested_ids = None if args.scenario_ids is None else set(args.scenario_ids)
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -326,6 +452,7 @@ def visualize_paths(args: argparse.Namespace) -> dict:
         "images_skipped": 0,
         "errors": 0,
         "region_counts": Counter(),
+        "visualization_config": asdict(config),
     }
     manifest_rows = []
     global_index = 0
@@ -353,6 +480,11 @@ def visualize_paths(args: argparse.Namespace) -> dict:
                 status: str,
                 error: str = "",
             ) -> None:
+                if status == "written":
+                    _write_visualization_sidecar(
+                        metadata["output_path"],
+                        fingerprint=metadata["fingerprint"],
+                    )
                 if result is None:
                     summary["errors"] += 1
                     frame_index = ""
@@ -398,19 +530,28 @@ def visualize_paths(args: argparse.Namespace) -> dict:
 
             stop_iteration = False
             for input_path in input_paths:
+                if (
+                    args.max_scenarios is not None
+                    and selected >= args.max_scenarios
+                ):
+                    break
+                annotations_by_index, annotations_by_scenario_id = (
+                    load_annotation_shard(
+                        annotation_paths_by_source[input_path.name],
+                        expected_source_file=input_path.name,
+                    )
+                )
                 for record_index, payload in iter_tfrecord(input_path):
                     scenario_index = global_index
                     global_index += 1
                     if scenario_index < args.start_index:
                         continue
-                    annotation = annotations_by_source_index.get(
-                        (input_path.name, record_index)
-                    )
+                    annotation = annotations_by_index.get(record_index)
                     if annotation is None:
                         scenario = scenario_pb2.Scenario()
                         scenario.ParseFromString(payload)
                         scenario_id = scenario.scenario_id
-                        annotation = annotations.get(scenario_id)
+                        annotation = annotations_by_scenario_id.get(scenario_id)
                     else:
                         scenario_id = annotation["scenario_id"]
                     if (
@@ -433,6 +574,15 @@ def visualize_paths(args: argparse.Namespace) -> dict:
                         "scenario_index": scenario_index,
                         "scenario_id": scenario_id,
                         "output_path": output_path,
+                        "fingerprint": (
+                            None
+                            if annotation is None
+                            else _visualization_fingerprint(
+                                annotation,
+                                args.frame_index,
+                                config,
+                            )
+                        ),
                     }
                     if annotation is None:
                         record_result(
@@ -446,25 +596,35 @@ def visualize_paths(args: argparse.Namespace) -> dict:
                         )
                         continue
                     if output_path.exists() and not args.overwrite:
-                        try:
-                            rendered = _existing_result(
-                                annotation,
-                                output_path,
-                                args.frame_index,
+                        if not args.resume:
+                            raise FileExistsError(
+                                f"Output already exists: {output_path}. Use "
+                                "--overwrite to replace it or --resume to "
+                                "validate and skip it."
                             )
-                            record_result(
-                                metadata,
-                                _rendered_result_dict(rendered),
-                                status="skipped_existing",
-                            )
-                        except Exception as exc:
-                            record_result(
-                                metadata,
-                                None,
-                                status="error",
-                                error=f"{type(exc).__name__}: {exc}",
-                            )
-                        continue
+                        if _visualization_is_reusable(
+                            output_path,
+                            fingerprint=metadata["fingerprint"],
+                        ):
+                            try:
+                                rendered = _existing_result(
+                                    annotation,
+                                    output_path,
+                                    args.frame_index,
+                                )
+                                record_result(
+                                    metadata,
+                                    _rendered_result_dict(rendered),
+                                    status="skipped_existing",
+                                )
+                            except Exception as exc:
+                                record_result(
+                                    metadata,
+                                    None,
+                                    status="error",
+                                    error=f"{type(exc).__name__}: {exc}",
+                                )
+                            continue
 
                     if executor is None:
                         try:

@@ -8,14 +8,32 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from .annotate import annotate_paths
+from .annotate import (
+    annotate_paths,
+    annotation_config_fingerprint,
+    source_file_fingerprint,
+)
 from .annotate import parse_args as parse_annotation_args
-from .plot_statistics import plot_statistics
+from .artifacts import (
+    artifact_identity_matches,
+    artifact_matches,
+    stable_fingerprint,
+)
+from .map_annotation import MapAnnotationConfig
+from .plot_statistics import (
+    AGGREGATE_SCHEMA_VERSION,
+    DEFAULT_FIGURE_WIDTH_CM,
+    aggregate_dependency_record,
+    plot_statistics,
+)
 from .plot_statistics import parse_args as parse_plot_args
+from .statistics import _completed_statistics_run
 from .statistics import parse_args as parse_statistics_args
 from .statistics import run_statistics
+from .statistics import statistics_run_fingerprint
 from .tfrecord_io import resolve_tfrecord_paths
 from .visualize import parse_args as parse_visualization_args
+from .visualize import resolve_annotation_paths
 from .visualize import visualize_paths
 
 
@@ -98,41 +116,136 @@ def _write_summary(path: Path, payload: dict) -> None:
 def _statistics_outputs_complete(
     output_dir: Path,
     input_paths: list[Path],
+    expected_args: argparse.Namespace,
+) -> dict | None:
+    return _completed_statistics_run(
+        output_dir / "summary.json",
+        run_fingerprint=statistics_run_fingerprint(
+            expected_args,
+            input_paths,
+        ),
+    )
+
+
+def _annotation_outputs_complete(
+    output_dir: Path,
+    input_paths: list[Path],
 ) -> dict | None:
     summary_path = output_dir / "summary.json"
-    if not summary_path.is_file():
-        return None
     try:
         payload = json.loads(summary_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    expected_inputs = [str(path.resolve()) for path in input_paths]
-    if payload.get("input_files") != expected_inputs:
+    if payload.get("input_files") != [str(path) for path in input_paths]:
+        return None
+    config = payload.get("config")
+    if (
+        not isinstance(config, dict)
+        or stable_fingerprint(config) != payload.get("config_fingerprint")
+        or payload.get("config_fingerprint")
+        != annotation_config_fingerprint(MapAnnotationConfig())
+        or payload.get("start_index") != 0
+        or payload.get("max_scenarios") is not None
+    ):
+        return None
+    expected_sources = {
+        path.name: source_file_fingerprint(path) for path in input_paths
+    }
+    if payload.get("source_fingerprints") != expected_sources:
         return None
     output_files = payload.get("output_files")
-    if not isinstance(output_files, dict):
+    output_artifacts = payload.get("output_artifacts")
+    if (
+        not isinstance(output_files, list)
+        or len(output_files) != len(input_paths)
+        or not all(Path(path).is_file() for path in output_files)
+        or not isinstance(output_artifacts, list)
+        or len(output_artifacts) != len(output_files)
+        or not all(
+            artifact_identity_matches(record)
+            for record in output_artifacts
+        )
+    ):
         return None
-    if not output_files or not all(Path(path).is_file() for path in output_files.values()):
+    return payload
+
+
+def _require_annotation_outputs(
+    output_dir: Path,
+    input_paths: list[Path],
+) -> dict:
+    payload = _annotation_outputs_complete(output_dir, input_paths)
+    if payload is None:
+        raise RuntimeError(
+            "Annotation outputs are missing, stale, or incomplete for "
+            f"{output_dir}. Run the annotations stage first."
+        )
+    return payload
+
+
+def _require_statistics_outputs(
+    output_dir: Path,
+    input_paths: list[Path],
+    expected_args: argparse.Namespace,
+) -> dict:
+    payload = _statistics_outputs_complete(
+        output_dir,
+        input_paths,
+        expected_args,
+    )
+    if payload is None:
+        raise RuntimeError(
+            "Statistics outputs are missing, stale, or incomplete for "
+            f"{output_dir}. Run the statistics stage first."
+        )
+    return payload
+
+
+def _aggregate_outputs_complete(
+    output_prefix: Path,
+    statistics_dir: Path,
+    annotation_paths: list[Path],
+    *,
+    dpi: int,
+) -> dict | None:
+    summary_path = output_prefix.with_name(
+        output_prefix.name + ".summary.json"
+    )
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("schema_version") != AGGREGATE_SCHEMA_VERSION:
+        return None
+    artifacts = payload.get("output_artifacts")
+    output_files = payload.get("output_files")
+    if (
+        not isinstance(artifacts, dict)
+        or not artifacts
+        or not isinstance(output_files, dict)
+        or set(artifacts) != set(output_files) - {"summary"}
+        or not all(artifact_matches(record) for record in artifacts.values())
+    ):
+        return None
+    try:
+        dependencies = aggregate_dependency_record(
+            statistics_dir,
+            annotation_paths,
+        )
+    except OSError:
+        return None
+    if payload.get("dependencies") != dependencies:
+        return None
+    expected_configuration = {
+        "dpi": dpi,
+        "width_cm": DEFAULT_FIGURE_WIDTH_CM,
+        "html_fragment": None,
+    }
+    if payload.get("configuration") != expected_configuration:
         return None
     payload = dict(payload)
     payload["resumed"] = True
     return payload
-
-
-def _aggregate_outputs_complete(output_prefix: Path) -> dict | None:
-    paths = {
-        "png": output_prefix.with_suffix(".png"),
-        "pdf": output_prefix.with_suffix(".pdf"),
-        "svg": output_prefix.with_suffix(".svg"),
-        "counts": output_prefix.with_name(output_prefix.name + "_counts.csv"),
-    }
-    if not all(path.is_file() and path.stat().st_size > 0 for path in paths.values()):
-        return None
-    return {
-        "resumed": True,
-        "annotation_errors": 0,
-        "output_files": {key: str(path) for key, path in paths.items()},
-    }
 
 
 def _stage_error_count(stage: str, result: dict) -> int:
@@ -323,6 +436,18 @@ def run_dataset(args: argparse.Namespace) -> dict:
                 "errors": 0,
             }
             summary["splits"][split] = split_summary
+            statistics_argv = [
+                "--input-path",
+                str(split_dir),
+                "--output-dir",
+                str(statistics_dir),
+                "--workers",
+                str(args.workers),
+                "--resume" if args.resume else "--no-resume",
+            ]
+            if args.overwrite:
+                statistics_argv.append("--overwrite")
+            statistics_args = parse_statistics_args(statistics_argv)
 
             if "annotations" in args.stages:
                 stage_argv = [
@@ -345,26 +470,7 @@ def run_dataset(args: argparse.Namespace) -> dict:
                 )
 
             if "statistics" in args.stages:
-                result = None
-                if args.resume and not args.overwrite:
-                    result = _statistics_outputs_complete(
-                        statistics_dir,
-                        input_paths,
-                    )
-                if result is None:
-                    stage_argv = [
-                        "--input-path",
-                        str(split_dir),
-                        "--output-dir",
-                        str(statistics_dir),
-                        "--workers",
-                        str(args.workers),
-                    ]
-                    if args.overwrite:
-                        stage_argv.append("--overwrite")
-                    result = run_statistics(
-                        parse_statistics_args(stage_argv)
-                    )
+                result = run_statistics(statistics_args)
                 split_summary["stages"]["statistics"] = (
                     _compact_stage_result("statistics", result)
                 )
@@ -373,6 +479,7 @@ def run_dataset(args: argparse.Namespace) -> dict:
                 )
 
             if "scenario-visualizations" in args.stages:
+                _require_annotation_outputs(annotation_dir, input_paths)
                 stage_argv = [
                     "--input-path",
                     str(split_dir),
@@ -385,6 +492,9 @@ def run_dataset(args: argparse.Namespace) -> dict:
                     "--dpi",
                     str(args.visualize_dpi),
                 ]
+                stage_argv.append(
+                    "--resume" if args.resume else "--no-resume"
+                )
                 if args.visualize_max_scenarios:
                     stage_argv.extend(
                         [
@@ -408,9 +518,23 @@ def run_dataset(args: argparse.Namespace) -> dict:
                 )
 
             if "aggregate-visualization" in args.stages:
+                _require_annotation_outputs(annotation_dir, input_paths)
+                _require_statistics_outputs(
+                    statistics_dir,
+                    input_paths,
+                    statistics_args,
+                )
+                annotation_paths = resolve_annotation_paths(
+                    [str(annotation_dir)]
+                )
                 result = None
                 if args.resume and not args.overwrite:
-                    result = _aggregate_outputs_complete(aggregate_prefix)
+                    result = _aggregate_outputs_complete(
+                        aggregate_prefix,
+                        statistics_dir,
+                        annotation_paths,
+                        dpi=args.aggregate_dpi,
+                    )
                 if result is None:
                     stage_argv = [
                         "--statistics-dir",
@@ -422,7 +546,7 @@ def run_dataset(args: argparse.Namespace) -> dict:
                         "--dpi",
                         str(args.aggregate_dpi),
                     ]
-                    if args.overwrite:
+                    if args.overwrite or (args.resume and result is None):
                         stage_argv.append("--overwrite")
                     result = plot_statistics(parse_plot_args(stage_argv))
                 split_summary["stages"]["aggregate-visualization"] = (

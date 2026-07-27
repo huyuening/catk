@@ -29,17 +29,32 @@ def resolve_tfrecord_paths(
             ]
             if not matches and entry.is_file():
                 matches = [entry]
+        if not matches:
+            raise FileNotFoundError(
+                f"No TFRecord shards matched input entry: {raw_entry}"
+            )
         resolved.extend(matches)
 
     unique: list[Path] = []
     seen: set[Path] = set()
     for path in resolved:
         absolute = path.resolve()
-        if absolute not in seen:
-            seen.add(absolute)
-            unique.append(absolute)
+        if absolute in seen:
+            raise ValueError(
+                f"Duplicate TFRecord input resolved more than once: {absolute}"
+            )
+        seen.add(absolute)
+        unique.append(absolute)
     if not unique:
         raise FileNotFoundError("No TFRecord shards matched the input paths")
+    names = {}
+    for path in unique:
+        previous = names.setdefault(path.name, path)
+        if previous != path:
+            raise ValueError(
+                "TFRecord inputs must have unique basenames because output "
+                f"shards are keyed by source filename: {previous} and {path}"
+            )
     return unique
 
 

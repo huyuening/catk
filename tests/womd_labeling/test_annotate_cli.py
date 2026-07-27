@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 
 import pytest
 
@@ -104,3 +105,41 @@ def test_overwrite_replaces_existing_annotation(tmp_path):
     assert summary["shards_written"] == 1
     assert summary["shards_skipped"] == 0
     assert output_path.stat().st_mtime_ns >= first_mtime
+
+
+def test_resume_rejects_changed_annotation_config(tmp_path):
+    input_path = tmp_path / "training.tfrecord-00000-of-00001"
+    write_tfrecord(
+        input_path,
+        [make_scenario("scenario-a").SerializeToString()],
+    )
+    output_dir = tmp_path / "labels"
+    annotate_paths(_args(input_path, output_dir))
+
+    with pytest.raises(ValueError, match="cannot be resumed"):
+        annotate_paths(
+            _args(
+                input_path,
+                output_dir,
+                "--near-distance-m",
+                "41",
+            )
+        )
+
+
+def test_resume_rejects_changed_source_identity(tmp_path):
+    input_path = tmp_path / "training.tfrecord-00000-of-00001"
+    write_tfrecord(
+        input_path,
+        [make_scenario("scenario-a").SerializeToString()],
+    )
+    output_dir = tmp_path / "labels"
+    annotate_paths(_args(input_path, output_dir))
+    stat = input_path.stat()
+    os.utime(
+        input_path,
+        ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000),
+    )
+
+    with pytest.raises(ValueError, match="cannot be resumed"):
+        annotate_paths(_args(input_path, output_dir))

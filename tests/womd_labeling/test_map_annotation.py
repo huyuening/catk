@@ -429,7 +429,7 @@ class MapAnnotationTest(unittest.TestCase):
         ).to_dict()
 
         encoded = json.dumps(payload)
-        self.assertIn("ego-map-annotation-v6", encoded)
+        self.assertIn("ego-map-annotation-v7", encoded)
         self.assertEqual(payload["scenario_index"], 7)
         self.assertEqual(payload["source_file"], "sample.tfrecord")
         self.assertEqual(payload["statistics"]["signalized_junction_count"], 1)

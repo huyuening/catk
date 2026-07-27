@@ -45,6 +45,9 @@ python -m src.womd_labeling.run_dataset \
   --workers 24
 ```
 
+逐场景绘图按 TFRecord 分片懒加载标注；即使标注覆盖完整数据集，内存中也
+只保留当前分片，而不会一次载入整个 split。
+
 若还要为每个场景都输出一张 PNG，增加：
 
 ```bash
@@ -64,10 +67,13 @@ VISUALIZE_MAX_SCENARIOS=100 \
 bash scripts/label_womd_dataset.sh
 ```
 
-默认启用恢复模式。每个完成的标注分片会校验 gzip、schema、源文件名、
-场景索引和记录数后再跳过；损坏或不兼容的结果不会被静默复用。统计和
-汇总图完整时也会复用。使用 `--overwrite`（脚本方式为
-`OVERWRITE=true`）可强制重算。
+默认启用恢复模式。每个标注及统计 TFRecord 分片都单独原子提交，并记录
+源文件、配置、选择范围和产物指纹；中断后只重算未完成或校验失败的分片。
+单场景 PNG 也带有渲染配置及输入指纹 sidecar，空文件、损坏文件或旧参数
+生成的图片会自动重画。统计汇总与聚合图使用最后写入的清单校验整组产物，
+不会把崩溃时留下的混合版本当作完成结果。使用 `--overwrite`（脚本方式为
+`OVERWRITE=true`）可强制重算；使用 `--no-resume` 时，只要目标产物已存在
+就会失败而不会静默复用。
 
 ## 分阶段运行
 
@@ -110,14 +116,19 @@ python -m src.womd_labeling.plot_statistics --help
     *.map-annotations.jsonl.gz
     summary.json
   statistics/<split>/
-    current_frame_road_types.csv.gz
-    current_frame_agent_sizes.csv.gz
-    agent_actions_by_frame.csv.gz
+    shards/
+      <序号>-<TFRecord名>.current-frame-road-types.csv.gz
+      <序号>-<TFRecord名>.current-frame-agent-sizes.csv.gz
+      <序号>-<TFRecord名>.agent-actions-by-frame.csv.gz
+      <序号>-<TFRecord名>.*-counts.csv
+      <序号>-<TFRecord名>.errors.jsonl
+      <序号>-<TFRecord名>.summary.json
     *_counts.csv
     errors.jsonl
     summary.json
   visualizations/scenarios/<split>/
     *.png
+    *.png.json
     manifest.csv
     summary.json
   visualizations/aggregate/
@@ -125,12 +136,15 @@ python -m src.womd_labeling.plot_statistics --help
     <split>.pdf
     <split>.svg
     <split>_counts.csv
+    <split>.summary.json
   run_summary.json
 ```
 
 `run_summary.json` 在每个 split 完成后原子更新，并仅记录输入、阶段计数、
-输出位置与错误数，大小不会随逐帧明细线性增长。统计明细保留在压缩 CSV
-中；各阶段的大文件先写入 `.partial`，完成后才原子改名。
+输出位置与错误数，大小不会随逐帧明细线性增长。统计明细按原始 TFRecord
+分片保留在压缩 CSV 中；聚合图直接读取有界 summary 中的尺寸/动作计数，
+不会再次扫描全部逐帧动作明细。各阶段的大文件先写入 `.partial`，完成后
+才原子改名，清单最后提交。
 
 ## 单场景调试
 

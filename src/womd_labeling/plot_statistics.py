@@ -27,6 +27,7 @@ DEFAULT_MAP_ANNOTATION_PATH = (
 )
 DEFAULT_OUTPUT_PREFIX = DEFAULT_STATISTICS_DIR / "womd_statistics_mixed_three_panel_en"
 DEFAULT_FIGURE_WIDTH_CM = 16.0
+AGGREGATE_SCHEMA_VERSION = "catk-womd-aggregate-visualization-v1"
 FIGURE_ASPECT_RATIO = 13.0 / 16.0
 DEFAULT_FONT_SIZE_PT = 7.5
 PANEL_LABEL_SIZE_PT = 9.0
@@ -43,6 +44,18 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib import font_manager  # noqa: E402
 from matplotlib.patches import Circle, Wedge  # noqa: E402
 import numpy as np  # noqa: E402
+
+from .agent_action_classification import (  # noqa: E402
+    decode_agent_action_frame_key,
+    decode_agent_action_key,
+)
+from .agent_size_classification import decode_agent_size_key  # noqa: E402
+from .artifacts import (  # noqa: E402
+    artifact_record,
+    input_fingerprint,
+    stable_fingerprint,
+)
+from .statistics import SCHEMA_VERSION as STATISTICS_SCHEMA_VERSION  # noqa: E402
 
 
 FONT_CANDIDATES = (
@@ -384,6 +397,53 @@ def recount_agent_actions(statistics_dir: Path) -> dict:
         counts[(record["object_type"], int(record["action_id"]))] += 1
         frame_indices.add(int(record["frame_index"]))
     return {"rows": rows, "counts": counts, "frame_indices": frame_indices}
+
+
+def agent_sizes_from_summary(summary: dict) -> dict:
+    aggregate = summary["aggregate"]
+    counts = Counter()
+    for key, count in aggregate["agent_size_counts"].items():
+        _, size_class = decode_agent_size_key(key)
+        counts[size_class] += int(count)
+    return {
+        "rows": sum(counts.values()),
+        "counts": counts,
+    }
+
+
+def agent_actions_from_summary(summary: dict) -> dict:
+    aggregate = summary["aggregate"]
+    counts = Counter()
+    for key, count in aggregate["agent_action_counts"].items():
+        object_type, action_id = decode_agent_action_key(key)
+        counts[(object_type, action_id)] += int(count)
+    frame_indices = {
+        decode_agent_action_frame_key(key)[0]
+        for key in aggregate["agent_action_frame_counts"]
+    }
+    return {
+        "rows": int(
+            aggregate["action_diagnostics"]["valid_state_frames"]
+        ),
+        "counts": counts,
+        "frame_indices": frame_indices,
+    }
+
+
+def aggregate_dependency_record(
+    statistics_dir: Path,
+    annotation_paths: Iterable[Path],
+) -> dict:
+    statistics_summary = statistics_dir / "summary.json"
+    annotation_identity = input_fingerprint(annotation_paths)
+    dependency_payload = {
+        "statistics_summary": artifact_record(statistics_summary),
+        "annotation_identity": annotation_identity,
+    }
+    return {
+        **dependency_payload,
+        "fingerprint": stable_fingerprint(dependency_payload),
+    }
 
 
 def _format_count(value: int) -> str:
@@ -1018,12 +1078,23 @@ def plot_statistics(args: argparse.Namespace) -> dict:
     map_annotation_paths = resolve_annotation_paths(args.map_annotation_path)
     output_prefix = args.output_prefix.expanduser().resolve()
 
-    road = recount_road_hierarchy(map_annotation_paths, frame_index=10)
-    sizes = recount_agent_sizes(statistics_dir)
-    actions = recount_agent_actions(statistics_dir)
     summary = json.loads(
         (statistics_dir / "summary.json").read_text(encoding="utf-8")
     )
+    if summary.get("schema_version") != STATISTICS_SCHEMA_VERSION:
+        raise ValueError(
+            "Statistics summary schema is incompatible with this plotter"
+        )
+    dependencies = aggregate_dependency_record(
+        statistics_dir,
+        map_annotation_paths,
+    )
+    road = recount_road_hierarchy(
+        map_annotation_paths,
+        frame_index=int(summary["frame_index"]),
+    )
+    sizes = agent_sizes_from_summary(summary)
+    actions = agent_actions_from_summary(summary)
     aggregate = summary["aggregate"]
     expected_road_rows = aggregate["scenarios"] - aggregate["errors"]
     expected_size_rows = sum(aggregate["agent_size_counts"].values())
@@ -1129,6 +1200,9 @@ def plot_statistics(args: argparse.Namespace) -> dict:
         "pdf": pdf_path,
         "svg": svg_path,
         "counts": csv_path,
+        "summary": output_prefix.with_name(
+            output_prefix.name + ".summary.json"
+        ),
     }
     if args.html_fragment is not None:
         output_paths["html"] = args.html_fragment.expanduser().resolve()
@@ -1174,12 +1248,20 @@ def plot_statistics(args: argparse.Namespace) -> dict:
             partial_paths["svg"],
             partial_paths["html"],
         )
-    for key, path in output_paths.items():
-        partial_paths[key].replace(path)
-
-    return {
+    result = {
+        "schema_version": AGGREGATE_SCHEMA_VERSION,
         "statistics_dir": str(statistics_dir),
         "annotation_files": [str(path) for path in map_annotation_paths],
+        "dependencies": dependencies,
+        "configuration": {
+            "dpi": args.dpi,
+            "width_cm": args.width_cm,
+            "html_fragment": (
+                None
+                if args.html_fragment is None
+                else str(args.html_fragment.expanduser().resolve())
+            ),
+        },
         "road_scenarios": road["rows"],
         "road_unknown": road["unknown"],
         "annotation_errors": road["errors"],
@@ -1189,6 +1271,23 @@ def plot_statistics(args: argparse.Namespace) -> dict:
             key: str(path) for key, path in output_paths.items()
         },
     }
+    result["output_artifacts"] = {
+        key: artifact_record(
+            partial_paths[key],
+            logical_path=output_paths[key],
+        )
+        for key in output_paths
+        if key != "summary"
+    }
+    partial_paths["summary"].write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    for key, path in output_paths.items():
+        if key != "summary":
+            partial_paths[key].replace(path)
+    partial_paths["summary"].replace(output_paths["summary"])
+    return result
 
 
 def main() -> None:

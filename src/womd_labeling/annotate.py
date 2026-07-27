@@ -5,6 +5,7 @@ from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict
 import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,7 @@ except ImportError:
             self.last_report = self.count
 
 
+from .artifacts import artifact_identity_record
 from .map_annotation import (
     MAP_ANNOTATION_SCHEMA_VERSION,
     MapAnnotationConfig,
@@ -276,12 +278,37 @@ def open_text_output(path: Path, compression: str) -> TextIO:
     return path.open("w", encoding="utf-8")
 
 
+def _stable_fingerprint(payload: dict) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def annotation_config_fingerprint(config: MapAnnotationConfig) -> str:
+    return _stable_fingerprint(asdict(config))
+
+
+def source_file_fingerprint(path: Path) -> str:
+    stat = path.stat()
+    return _stable_fingerprint(
+        {
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    )
+
+
 def validate_completed_annotation(
     path: Path,
     *,
     source_file: str,
     expected_records: int,
     expected_indices: range | None = None,
+    expected_config_fingerprint: str | None = None,
+    expected_source_fingerprint: str | None = None,
 ) -> dict:
     """Validate a completed shard before resume skips its raw input."""
     opener = gzip.open if path.name.endswith(".gz") else open
@@ -310,6 +337,22 @@ def validate_completed_annotation(
                 if row.get("source_file") != source_file:
                     raise ValueError(
                         f"source mismatch on line {line_number}"
+                    )
+                if (
+                    expected_config_fingerprint is not None
+                    and row.get("annotation_config_fingerprint")
+                    != expected_config_fingerprint
+                ):
+                    raise ValueError(
+                        f"annotation config mismatch on line {line_number}"
+                    )
+                if (
+                    expected_source_fingerprint is not None
+                    and row.get("source_fingerprint")
+                    != expected_source_fingerprint
+                ):
+                    raise ValueError(
+                        f"source fingerprint mismatch on line {line_number}"
                     )
                 scenario_index = row.get("scenario_index")
                 if not isinstance(scenario_index, int):
@@ -352,6 +395,8 @@ def process_record(
     source_file: str,
     scenario_index: int,
     config: MapAnnotationConfig,
+    config_fingerprint: str,
+    source_fingerprint: str,
 ) -> dict:
     scenario = scenario_pb2.Scenario()
     try:
@@ -363,6 +408,8 @@ def process_record(
             source_file=source_file,
         )
         result = annotation.to_dict()
+        result["annotation_config_fingerprint"] = config_fingerprint
+        result["source_fingerprint"] = source_fingerprint
         statistics = result["statistics"]
         return {
             "json": json.dumps(result, ensure_ascii=False, separators=(",", ":")),
@@ -376,6 +423,8 @@ def process_record(
             "source_file": source_file,
             "scenario_index": scenario_index,
             "scenario_id": scenario.scenario_id or None,
+            "annotation_config_fingerprint": config_fingerprint,
+            "source_fingerprint": source_fingerprint,
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc(),
         }
@@ -531,6 +580,10 @@ def annotate_paths(args: argparse.Namespace) -> dict:
         ),
         freeway_ramp_topology_hops=args.freeway_ramp_topology_hops,
     )
+    config_fingerprint = annotation_config_fingerprint(config)
+    source_fingerprints = {
+        path: source_file_fingerprint(path) for path in paths
+    }
 
     shard_record_counts = {
         path: count_tfrecord_records(path) for path in paths
@@ -555,6 +608,10 @@ def annotate_paths(args: argparse.Namespace) -> dict:
         "input_files": [str(path) for path in paths],
         "output_files": [],
         "config": asdict(config),
+        "config_fingerprint": config_fingerprint,
+        "source_fingerprints": {
+            path.name: source_fingerprints[path] for path in paths
+        },
         "workers": args.workers,
         "start_index": args.start_index,
         "max_scenarios": args.max_scenarios,
@@ -612,6 +669,10 @@ def annotate_paths(args: argparse.Namespace) -> dict:
                             source_file=path.name,
                             expected_records=len(selected_indices),
                             expected_indices=selected_indices,
+                            expected_config_fingerprint=config_fingerprint,
+                            expected_source_fingerprint=(
+                                source_fingerprints[path]
+                            ),
                         )
                     except ValueError as exc:
                         raise ValueError(
@@ -646,6 +707,8 @@ def annotate_paths(args: argparse.Namespace) -> dict:
                                 path.name,
                                 record_index,
                                 config,
+                                config_fingerprint,
+                                source_fingerprints[path],
                             )
                             output.write(result["json"] + "\n")
                             update_summary(summary, result)
@@ -657,6 +720,8 @@ def annotate_paths(args: argparse.Namespace) -> dict:
                                 path.name,
                                 record_index,
                                 config,
+                                config_fingerprint,
+                                source_fingerprints[path],
                             )
                             pending[future] = record_index
                             if len(pending) >= args.workers * 3:
@@ -684,6 +749,14 @@ def annotate_paths(args: argparse.Namespace) -> dict:
                         )
 
                 if wrote_this_shard:
+                    if (
+                        source_file_fingerprint(path)
+                        != source_fingerprints[path]
+                    ):
+                        partial_path.unlink(missing_ok=True)
+                        raise RuntimeError(
+                            f"Source TFRecord changed while annotating: {path}"
+                        )
                     partial_path.replace(output_path)
                     summary["output_files"].append(str(output_path))
                     summary["shards_written"] += 1
@@ -703,6 +776,10 @@ def annotate_paths(args: argparse.Namespace) -> dict:
     summary["scenarios_completed"] = (
         summary["scenarios_written"] + summary["scenarios_skipped"]
     )
+    summary["output_artifacts"] = [
+        artifact_identity_record(Path(path))
+        for path in summary["output_files"]
+    ]
     summary_path = output_dir / "summary.json"
     summary["summary_path"] = str(summary_path)
     summary_partial = summary_path.with_name(summary_path.name + ".partial")

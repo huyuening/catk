@@ -26,7 +26,7 @@ except ImportError:
 from ._compat.waymonizer import Waymonizer as ScenarioProcessor
 
 
-MAP_ANNOTATION_SCHEMA_VERSION = "ego-map-annotation-v6"
+MAP_ANNOTATION_SCHEMA_VERSION = "ego-map-annotation-v7"
 _MAX_LANE_NEIGHBOR_TOPOLOGY_HOPS = 8
 _GATE_LANE_DEDUP_TOLERANCE_M = 1.0
 _ROUNDABOUT_MIN_SPAN_M = 8.0

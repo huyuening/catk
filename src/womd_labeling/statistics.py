@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import csv
 from dataclasses import asdict
@@ -14,6 +14,15 @@ from typing import Iterable, Sequence
 
 from tqdm import tqdm
 
+from .artifacts import (
+    artifact_identity_matches,
+    artifact_identity_record,
+    artifact_matches,
+    artifact_record,
+    file_identity,
+    input_fingerprint,
+    stable_fingerprint,
+)
 from .agent_action_classification import (
     ACTION_LABELS_ZH,
     ACTION_NAMES,
@@ -63,7 +72,7 @@ DEFAULT_INPUT = str(
 )
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "road_type_statistics"
 DEFAULT_FRAME_NUMBER = 11
-SCHEMA_VERSION = "womd-current-frame-road-subtype-all-frame-action-statistics-v5"
+SCHEMA_VERSION = "womd-current-frame-road-subtype-all-frame-action-statistics-v6"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,11 +141,82 @@ def build_parser() -> argparse.ArgumentParser:
         default=-0.5,
     )
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Validate and reuse completed per-TFRecord statistics shards. "
+            "Enabled by default; --overwrite takes precedence."
+        ),
+    )
     return parser
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
+
+
+def statistics_run_configuration(args: argparse.Namespace) -> dict:
+    return {
+        "frame_number": args.frame_number,
+        "start_index": args.start_index,
+        "max_scenarios": args.max_scenarios,
+        "map_config": asdict(
+            MapAnnotationConfig(
+                near_distance_m=args.near_distance_m,
+                lane_half_width_m=args.lane_half_width_m,
+                arm_angle_threshold_deg=args.arm_angle_threshold_deg,
+                max_map_match_distance_m=args.max_map_match_distance_m,
+                max_map_match_heading_error_deg=(
+                    args.max_map_match_heading_error_deg
+                ),
+                include_stop_controlled=not args.signalized_only,
+            )
+        ),
+        "agent_size_config": asdict(
+            AgentSizeConfig(
+                vehicle_large_length_m=args.vehicle_large_length_m,
+                vehicle_motorcycle_max_width_m=(
+                    args.vehicle_motorcycle_max_width_m
+                ),
+                vehicle_motorcycle_max_length_m=(
+                    args.vehicle_motorcycle_max_length_m
+                ),
+                cyclist_ebike_min_speed_mps=(
+                    args.cyclist_ebike_min_speed_mps
+                ),
+                pedestrian_child_max_height_m=(
+                    args.pedestrian_child_max_height_m
+                ),
+            )
+        ),
+        "agent_action_config": asdict(
+            AgentActionConfig(
+                stop_speed_mps=args.action_stop_speed_mps,
+                acceleration_threshold_mps2=(
+                    args.action_acceleration_threshold_mps2
+                ),
+                deceleration_threshold_mps2=(
+                    args.action_deceleration_threshold_mps2
+                ),
+            )
+        ),
+    }
+
+
+def statistics_run_fingerprint(
+    args: argparse.Namespace,
+    paths: Iterable[Path],
+) -> str:
+    identity = input_fingerprint(paths)
+    return stable_fingerprint(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "input_fingerprint": identity["fingerprint"],
+            "configuration": statistics_run_configuration(args),
+        }
+    )
 
 
 def iter_selected_tasks(
@@ -630,20 +710,27 @@ def action_count_rows_by_frame(
 ) -> list[dict]:
     counts = accumulator["agent_action_frame_counts"]
     frame_type_totals = accumulator["agent_action_frame_type_counts"]
-    observed_frames = sorted(
-        {decode_agent_action_frame_key(key)[0] for key in counts}
-    )
+    decoded_counts = {}
+    observed_types_by_frame = defaultdict(set)
+    frame_action_totals = Counter()
+    frame_denominators = Counter()
+    for key, count in counts.items():
+        frame_index, object_type, action_id = (
+            decode_agent_action_frame_key(key)
+        )
+        decoded_counts[(frame_index, object_type, action_id)] = count
+        observed_types_by_frame[frame_index].add(object_type)
+        frame_action_totals[(frame_index, action_id)] += count
+    for key, count in frame_type_totals.items():
+        frame_text, object_type = key.split("\t", 1)
+        frame_index = int(frame_text)
+        observed_types_by_frame[frame_index].add(object_type)
+        frame_denominators[frame_index] += count
+    observed_frames = sorted(observed_types_by_frame)
     rows = []
 
     for frame_index in observed_frames:
-        observed_types = {
-            object_type
-            for key in counts
-            for key_frame, object_type, _ in (
-                decode_agent_action_frame_key(key),
-            )
-            if key_frame == frame_index
-        }
+        observed_types = observed_types_by_frame[frame_index]
         object_types = set(EXPECTED_AGENT_CLASSES) | observed_types
         for object_type in sorted(
             object_types,
@@ -654,13 +741,8 @@ def action_count_rows_by_frame(
                 0,
             )
             for action_id, action_name in ACTION_NAMES.items():
-                count = counts.get(
-                    encode_agent_action_frame_key(
-                        frame_index,
-                        object_type,
-                        action_id,
-                    ),
-                    0,
+                count = decoded_counts.get(
+                    (frame_index, object_type, action_id), 0
                 )
                 rows.append(
                     {
@@ -686,20 +768,9 @@ def action_count_rows_by_frame(
                     }
                 )
 
-        frame_denominator = sum(
-            count
-            for key, count in frame_type_totals.items()
-            if int(key.split("\t", 1)[0]) == frame_index
-        )
+        frame_denominator = frame_denominators[frame_index]
         for action_id, action_name in ACTION_NAMES.items():
-            count = sum(
-                count
-                for key, count in counts.items()
-                if (
-                    decode_agent_action_frame_key(key)[0] == frame_index
-                    and decode_agent_action_frame_key(key)[2] == action_id
-                )
-            )
+            count = frame_action_totals[(frame_index, action_id)]
             rows.append(
                 {
                     "scope": "ONE_DATASET_FRAME",
@@ -736,6 +807,97 @@ def serializable_accumulator(accumulator: dict) -> dict:
         else:
             payload[key] = value
     return payload
+
+
+COUNTER_ACCUMULATOR_KEYS = (
+    "dataset_current_time_index_counts",
+    "road_counts",
+    "road_unknown_reason_counts",
+    "agent_diagnostics",
+    "agent_type_counts",
+    "agent_size_counts",
+    "action_diagnostics",
+    "agent_action_type_counts",
+    "agent_action_counts",
+    "agent_action_frame_type_counts",
+    "agent_action_frame_counts",
+)
+
+SCALAR_ACCUMULATOR_KEYS = (
+    "scenarios",
+    "errors",
+    "current_index_mismatches",
+    "scenarios_with_driveway_polygons",
+    "driveway_polygons",
+)
+
+
+def raw_accumulator_payload(accumulator: dict) -> dict:
+    payload = {
+        key: int(accumulator[key]) for key in SCALAR_ACCUMULATOR_KEYS
+    }
+    payload.update(
+        {
+            key: dict(accumulator[key])
+            for key in COUNTER_ACCUMULATOR_KEYS
+        }
+    )
+    payload["agent_dimension_stats"] = {
+        key: dict(stats)
+        for key, stats in accumulator["agent_dimension_stats"].items()
+    }
+    return payload
+
+
+def accumulator_from_raw(payload: dict) -> dict:
+    accumulator = new_accumulator()
+    for key in SCALAR_ACCUMULATOR_KEYS:
+        accumulator[key] = int(payload[key])
+    for key in COUNTER_ACCUMULATOR_KEYS:
+        accumulator[key].update(payload[key])
+    accumulator["agent_dimension_stats"] = {
+        key: dict(stats)
+        for key, stats in payload["agent_dimension_stats"].items()
+    }
+    return accumulator
+
+
+def merge_accumulators(target: dict, source: dict) -> None:
+    for key in SCALAR_ACCUMULATOR_KEYS:
+        target[key] += source[key]
+    for key in COUNTER_ACCUMULATOR_KEYS:
+        target[key].update(source[key])
+    for dimension_key, source_stats in source[
+        "agent_dimension_stats"
+    ].items():
+        target_stats = target["agent_dimension_stats"].setdefault(
+            dimension_key,
+            {
+                "count": 0,
+                "sum_length_m": 0.0,
+                "sum_width_m": 0.0,
+                "sum_height_m": 0.0,
+                "min_length_m": math.inf,
+                "min_width_m": math.inf,
+                "min_height_m": math.inf,
+                "max_length_m": -math.inf,
+                "max_width_m": -math.inf,
+                "max_height_m": -math.inf,
+            },
+        )
+        target_stats["count"] += source_stats["count"]
+        for dimension in ("length_m", "width_m", "height_m"):
+            target_stats[f"sum_{dimension}"] += source_stats[
+                f"sum_{dimension}"
+            ]
+            target_stats[f"min_{dimension}"] = min(
+                target_stats[f"min_{dimension}"],
+                source_stats[f"min_{dimension}"],
+            )
+            target_stats[f"max_{dimension}"] = max(
+                target_stats[f"max_{dimension}"],
+                source_stats[f"max_{dimension}"],
+            )
 
 
 ROAD_DETAIL_FIELDS = (
@@ -870,7 +1032,193 @@ ACTION_COUNT_FIELDS = (
 )
 
 
+STATISTICS_SHARD_SCHEMA_VERSION = "catk-womd-statistics-shard-v1"
+
+
+def _selected_record_range(
+    *,
+    shard_global_start: int,
+    shard_record_count: int,
+    selection_start: int,
+    selection_count: int | None,
+) -> range:
+    shard_global_end = shard_global_start + shard_record_count
+    selection_end = (
+        None
+        if selection_count is None
+        else selection_start + selection_count
+    )
+    selected_global_start = max(shard_global_start, selection_start)
+    selected_global_end = shard_global_end
+    if selection_end is not None:
+        selected_global_end = min(selected_global_end, selection_end)
+    if selected_global_end <= selected_global_start:
+        return range(0, 0)
+    return range(
+        selected_global_start - shard_global_start,
+        selected_global_end - shard_global_start,
+    )
+
+
+def _statistics_shard_paths(
+    shards_dir: Path,
+    source_order: int,
+    source_file: str,
+) -> dict[str, Path]:
+    prefix = shards_dir / f"{source_order:05d}-{source_file}"
+    return {
+        "road_details": prefix.with_name(
+            prefix.name + ".current-frame-road-types.csv.gz"
+        ),
+        "agent_details": prefix.with_name(
+            prefix.name + ".current-frame-agent-sizes.csv.gz"
+        ),
+        "action_details": prefix.with_name(
+            prefix.name + ".agent-actions-by-frame.csv.gz"
+        ),
+        "road_counts": prefix.with_name(
+            prefix.name + ".current-frame-road-type-counts.csv"
+        ),
+        "agent_counts": prefix.with_name(
+            prefix.name + ".current-frame-agent-size-counts.csv"
+        ),
+        "action_counts": prefix.with_name(
+            prefix.name + ".agent-action-counts.csv"
+        ),
+        "action_counts_by_frame": prefix.with_name(
+            prefix.name + ".agent-action-counts-by-frame.csv"
+        ),
+        "errors": prefix.with_name(prefix.name + ".errors.jsonl"),
+        "summary": prefix.with_name(prefix.name + ".summary.json"),
+    }
+
+
+def _global_statistics_paths(output_dir: Path) -> dict[str, Path]:
+    return {
+        "road_counts": output_dir / "current_frame_road_type_counts.csv",
+        "agent_counts": output_dir / "current_frame_agent_size_counts.csv",
+        "action_counts": output_dir / "agent_action_counts.csv",
+        "action_counts_by_frame": (
+            output_dir / "agent_action_counts_by_frame.csv"
+        ),
+        "errors": output_dir / "errors.jsonl",
+        "summary": output_dir / "summary.json",
+    }
+
+
+def _completed_shard(
+    summary_path: Path,
+    *,
+    run_fingerprint: str,
+) -> dict | None:
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        payload.get("schema_version") != STATISTICS_SHARD_SCHEMA_VERSION
+        or payload.get("run_fingerprint") != run_fingerprint
+        or not isinstance(payload.get("raw_accumulator"), dict)
+    ):
+        return None
+    artifacts = payload.get("output_artifacts")
+    if (
+        not isinstance(artifacts, dict)
+        or not artifacts
+        or not all(
+            artifact_identity_matches(record)
+            for record in artifacts.values()
+        )
+    ):
+        return None
+    return payload
+
+
+def _completed_statistics_run(
+    summary_path: Path,
+    *,
+    run_fingerprint: str,
+) -> dict | None:
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("run_fingerprint") != run_fingerprint
+    ):
+        return None
+    artifacts = payload.get("output_artifacts")
+    shard_manifests = payload.get("shard_manifests")
+    if (
+        not isinstance(artifacts, dict)
+        or not artifacts
+        or not all(
+            artifact_identity_matches(record)
+            for record in artifacts.values()
+        )
+        or not isinstance(shard_manifests, list)
+    ):
+        return None
+    for shard in shard_manifests:
+        summary_record = shard.get("summary_artifact")
+        if not artifact_matches(summary_record):
+            return None
+        completed = _completed_shard(
+            Path(summary_record["path"]),
+            run_fingerprint=shard["run_fingerprint"],
+        )
+        if completed is None:
+            return None
+    payload = dict(payload)
+    payload["resumed"] = True
+    return payload
+
+
+def _write_counter_tables(
+    accumulator: dict,
+    source_file: str,
+    frame_number: int,
+    paths: dict[str, Path],
+) -> dict[str, int]:
+    row_groups = (
+        (
+            "road_counts",
+            ROAD_COUNT_FIELDS,
+            road_count_rows(accumulator, source_file, frame_number),
+        ),
+        (
+            "agent_counts",
+            AGENT_COUNT_FIELDS,
+            agent_count_rows(accumulator, source_file, frame_number),
+        ),
+        (
+            "action_counts",
+            ACTION_COUNT_FIELDS,
+            action_count_rows(accumulator, source_file),
+        ),
+        (
+            "action_counts_by_frame",
+            ACTION_COUNT_FIELDS,
+            action_count_rows_by_frame(accumulator, source_file),
+        ),
+    )
+    row_counts = {}
+    for key, fields, rows in row_groups:
+        with paths[key].open(
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        row_counts[key] = len(rows)
+    return row_counts
+
+
 def run_statistics(args: argparse.Namespace) -> dict:
+    """Compute resumable, per-TFRecord statistics and bounded split summaries."""
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
     if args.frame_number < 1:
@@ -881,31 +1229,13 @@ def run_statistics(args: argparse.Namespace) -> dict:
         raise ValueError("--max-scenarios must be positive")
 
     paths = resolve_tfrecord_paths(args.input_path)
-    frame_index = args.frame_number - 1
+    input_identity = input_fingerprint(paths)
     output_dir = args.output_dir.expanduser().resolve()
+    shards_dir = output_dir / "shards"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_paths = {
-        "road_details": output_dir / "current_frame_road_types.csv.gz",
-        "agent_details": output_dir / "current_frame_agent_sizes.csv.gz",
-        "action_details": output_dir / "agent_actions_by_frame.csv.gz",
-        "road_counts": output_dir / "current_frame_road_type_counts.csv",
-        "agent_counts": output_dir / "current_frame_agent_size_counts.csv",
-        "action_counts": output_dir / "agent_action_counts.csv",
-        "action_counts_by_frame": output_dir / "agent_action_counts_by_frame.csv",
-        "errors": output_dir / "errors.jsonl",
-        "summary": output_dir / "summary.json",
-    }
-    existing = [path for path in output_paths.values() if path.exists()]
-    if existing and not args.overwrite:
-        raise FileExistsError(
-            f"Output exists: {existing[0]}. Use --overwrite to replace it."
-        )
-    working_paths = {
-        key: path.with_name(path.name + ".partial")
-        for key, path in output_paths.items()
-    }
-    for path in working_paths.values():
-        path.unlink(missing_ok=True)
+    shards_dir.mkdir(parents=True, exist_ok=True)
+    global_paths = _global_statistics_paths(output_dir)
+    frame_index = args.frame_number - 1
 
     map_config = MapAnnotationConfig(
         near_distance_m=args.near_distance_m,
@@ -917,10 +1247,16 @@ def run_statistics(args: argparse.Namespace) -> dict:
     )
     size_config = AgentSizeConfig(
         vehicle_large_length_m=args.vehicle_large_length_m,
-        vehicle_motorcycle_max_width_m=args.vehicle_motorcycle_max_width_m,
-        vehicle_motorcycle_max_length_m=args.vehicle_motorcycle_max_length_m,
+        vehicle_motorcycle_max_width_m=(
+            args.vehicle_motorcycle_max_width_m
+        ),
+        vehicle_motorcycle_max_length_m=(
+            args.vehicle_motorcycle_max_length_m
+        ),
         cyclist_ebike_min_speed_mps=args.cyclist_ebike_min_speed_mps,
-        pedestrian_child_max_height_m=args.pedestrian_child_max_height_m,
+        pedestrian_child_max_height_m=(
+            args.pedestrian_child_max_height_m
+        ),
     )
     action_config = AgentActionConfig(
         stop_speed_mps=args.action_stop_speed_mps,
@@ -931,249 +1267,409 @@ def run_statistics(args: argparse.Namespace) -> dict:
             args.action_deceleration_threshold_mps2
         ),
     )
-    total = selected_task_count(paths, args.start_index, args.max_scenarios)
-    aggregate = new_accumulator()
-    by_source = {path.name: new_accumulator() for path in paths}
+    run_configuration = statistics_run_configuration(args)
+    run_fingerprint = statistics_run_fingerprint(args, paths)
 
-    with gzip.open(
-        working_paths["road_details"], "wt", newline="", encoding="utf-8"
-    ) as road_stream, gzip.open(
-        working_paths["agent_details"], "wt", newline="", encoding="utf-8"
-    ) as agent_stream, gzip.open(
-        working_paths["action_details"], "wt", newline="", encoding="utf-8"
-    ) as action_stream, working_paths["errors"].open(
-        "w", encoding="utf-8"
-    ) as error_stream:
-        road_writer = csv.DictWriter(road_stream, fieldnames=ROAD_DETAIL_FIELDS)
-        agent_writer = csv.DictWriter(agent_stream, fieldnames=AGENT_DETAIL_FIELDS)
-        action_writer = csv.DictWriter(
-            action_stream,
-            fieldnames=ACTION_DETAIL_FIELDS,
+    if args.resume and not args.overwrite:
+        completed = _completed_statistics_run(
+            global_paths["summary"],
+            run_fingerprint=run_fingerprint,
         )
-        road_writer.writeheader()
-        agent_writer.writeheader()
-        action_writer.writeheader()
-
-        def consume(result: dict) -> None:
-            update_accumulator(aggregate, result)
-            update_accumulator(by_source[result["source_file"]], result)
-            if result["error"] is None:
-                road_writer.writerow(result["road_record"])
-                agent_writer.writerows(result["agent_records"])
-                action_writer.writerows(result["action_records"])
-            else:
-                error_stream.write(json.dumps(result, ensure_ascii=False) + "\n")
-
-        tasks = iter_selected_tasks(paths, args.start_index, args.max_scenarios)
-        description = (
-            f"Frame {args.frame_number} road/size + all-frame actions"
-        )
-        with tqdm(total=total, desc=description, unit="scenario") as progress:
-            if args.workers == 1:
-                for task in tasks:
-                    consume(
-                        process_scenario(
-                            *task,
-                            map_config,
-                            size_config,
-                            action_config,
-                            frame_index,
-                        )
-                    )
-                    progress.update(1)
-            else:
-                with ProcessPoolExecutor(max_workers=args.workers) as executor:
-                    pending = {}
-                    for task in tasks:
-                        future = executor.submit(
-                            process_scenario,
-                            *task,
-                            map_config,
-                            size_config,
-                            action_config,
-                            frame_index,
-                        )
-                        pending[future] = None
-                        if len(pending) >= args.workers * 3:
-                            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                            for completed in done:
-                                pending.pop(completed)
-                                consume(completed.result())
-                                progress.update(1)
-                    while pending:
-                        done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                        for completed in done:
-                            pending.pop(completed)
-                            consume(completed.result())
-                            progress.update(1)
-
-    road_rows = road_count_rows(aggregate, "ALL", args.frame_number)
-    agent_rows = agent_count_rows(aggregate, "ALL", args.frame_number)
-    action_rows = action_count_rows(aggregate, "ALL")
-    action_frame_rows = action_count_rows_by_frame(aggregate, "ALL")
-    for source_file in sorted(by_source):
-        road_rows.extend(
-            road_count_rows(by_source[source_file], source_file, args.frame_number)
-        )
-        agent_rows.extend(
-            agent_count_rows(by_source[source_file], source_file, args.frame_number)
-        )
-        action_rows.extend(
-            action_count_rows(by_source[source_file], source_file)
-        )
-        action_frame_rows.extend(
-            action_count_rows_by_frame(
-                by_source[source_file],
-                source_file,
+        if completed is not None:
+            return completed
+    if not args.resume and not args.overwrite:
+        existing = [
+            path for path in global_paths.values() if path.exists()
+        ]
+        existing.extend(shards_dir.glob("*"))
+        if existing:
+            raise FileExistsError(
+                f"Output exists: {existing[0]}. Use --overwrite to replace "
+                "it or --resume to validate and reuse it."
             )
+
+    record_counts = {
+        path: count_tfrecord_records(path) for path in paths
+    }
+    selection_by_path = {}
+    shard_global_starts = {}
+    next_global_index = 0
+    for path in paths:
+        shard_global_starts[path] = next_global_index
+        selection_by_path[path] = _selected_record_range(
+            shard_global_start=next_global_index,
+            shard_record_count=record_counts[path],
+            selection_start=args.start_index,
+            selection_count=args.max_scenarios,
         )
-    with working_paths["road_counts"].open(
-        "w", newline="", encoding="utf-8"
-    ) as stream:
-        writer = csv.DictWriter(stream, fieldnames=ROAD_COUNT_FIELDS)
-        writer.writeheader()
-        writer.writerows(road_rows)
-    with working_paths["agent_counts"].open(
-        "w", newline="", encoding="utf-8"
-    ) as stream:
-        writer = csv.DictWriter(stream, fieldnames=AGENT_COUNT_FIELDS)
-        writer.writeheader()
-        writer.writerows(agent_rows)
-    with working_paths["action_counts"].open(
-        "w", newline="", encoding="utf-8"
-    ) as stream:
-        writer = csv.DictWriter(stream, fieldnames=ACTION_COUNT_FIELDS)
-        writer.writeheader()
-        writer.writerows(action_rows)
-    with working_paths["action_counts_by_frame"].open(
-        "w", newline="", encoding="utf-8"
-    ) as stream:
-        writer = csv.DictWriter(stream, fieldnames=ACTION_COUNT_FIELDS)
-        writer.writeheader()
-        writer.writerows(action_frame_rows)
+        next_global_index += record_counts[path]
+    total = sum(len(indices) for indices in selection_by_path.values())
+
+    aggregate = new_accumulator()
+    shard_manifests = []
+    shard_error_paths = []
+    table_row_counts = {
+        "road_counts": 0,
+        "agent_counts": 0,
+        "action_counts": 0,
+        "action_counts_by_frame": 0,
+    }
+    executor = (
+        ProcessPoolExecutor(max_workers=args.workers)
+        if args.workers > 1
+        else None
+    )
+    try:
+        with tqdm(
+            total=total,
+            desc=(
+                f"Frame {args.frame_number} road/size + all-frame actions"
+            ),
+            unit="scenario",
+        ) as progress:
+            for source_order, path in enumerate(paths):
+                selected_indices = selection_by_path[path]
+                if not selected_indices:
+                    continue
+                source_identity = file_identity(path)
+                shard_paths = _statistics_shard_paths(
+                    shards_dir,
+                    source_order,
+                    path.name,
+                )
+                shard_fingerprint = stable_fingerprint(
+                    {
+                        "schema_version": STATISTICS_SHARD_SCHEMA_VERSION,
+                        "source": source_identity,
+                        "selection": {
+                            "start": selected_indices.start,
+                            "stop": selected_indices.stop,
+                        },
+                        "configuration": run_configuration,
+                    }
+                )
+                completed_shard = None
+                if args.resume and not args.overwrite:
+                    completed_shard = _completed_shard(
+                        shard_paths["summary"],
+                        run_fingerprint=shard_fingerprint,
+                    )
+                if completed_shard is not None:
+                    source_accumulator = accumulator_from_raw(
+                        completed_shard["raw_accumulator"]
+                    )
+                    merge_accumulators(aggregate, source_accumulator)
+                    for key, count in completed_shard[
+                        "table_row_counts"
+                    ].items():
+                        table_row_counts[key] += int(count)
+                    progress.update(len(selected_indices))
+                else:
+                    partial_paths = {
+                        key: output_path.with_name(
+                            output_path.name + ".partial"
+                        )
+                        for key, output_path in shard_paths.items()
+                    }
+                    for partial_path in partial_paths.values():
+                        partial_path.unlink(missing_ok=True)
+                    source_accumulator = new_accumulator()
+                    with gzip.open(
+                        partial_paths["road_details"],
+                        "wt",
+                        newline="",
+                        encoding="utf-8",
+                    ) as road_stream, gzip.open(
+                        partial_paths["agent_details"],
+                        "wt",
+                        newline="",
+                        encoding="utf-8",
+                    ) as agent_stream, gzip.open(
+                        partial_paths["action_details"],
+                        "wt",
+                        newline="",
+                        encoding="utf-8",
+                    ) as action_stream, partial_paths["errors"].open(
+                        "w",
+                        encoding="utf-8",
+                    ) as error_stream:
+                        road_writer = csv.DictWriter(
+                            road_stream,
+                            fieldnames=ROAD_DETAIL_FIELDS,
+                        )
+                        agent_writer = csv.DictWriter(
+                            agent_stream,
+                            fieldnames=AGENT_DETAIL_FIELDS,
+                        )
+                        action_writer = csv.DictWriter(
+                            action_stream,
+                            fieldnames=ACTION_DETAIL_FIELDS,
+                        )
+                        road_writer.writeheader()
+                        agent_writer.writeheader()
+                        action_writer.writeheader()
+
+                        def consume(result: dict) -> None:
+                            update_accumulator(
+                                source_accumulator,
+                                result,
+                            )
+                            if result["error"] is None:
+                                road_writer.writerow(result["road_record"])
+                                agent_writer.writerows(
+                                    result["agent_records"]
+                                )
+                                action_writer.writerows(
+                                    result["action_records"]
+                                )
+                            else:
+                                error_stream.write(
+                                    json.dumps(
+                                        result,
+                                        ensure_ascii=False,
+                                    )
+                                    + "\n"
+                                )
+
+                        if executor is None:
+                            for record_index, raw_payload in iter_tfrecord(
+                                path
+                            ):
+                                if record_index < selected_indices.start:
+                                    continue
+                                if record_index >= selected_indices.stop:
+                                    break
+                                consume(
+                                    process_scenario(
+                                        str(path),
+                                        path.name,
+                                        record_index,
+                                        (
+                                            shard_global_starts[path]
+                                            + record_index
+                                        ),
+                                        raw_payload,
+                                        map_config,
+                                        size_config,
+                                        action_config,
+                                        frame_index,
+                                    )
+                                )
+                                progress.update(1)
+                        else:
+                            pending = {}
+                            result_buffer = {}
+                            next_result_index = selected_indices.start
+
+                            def drain_completed() -> None:
+                                nonlocal next_result_index
+                                done, _ = wait(
+                                    pending,
+                                    return_when=FIRST_COMPLETED,
+                                )
+                                for future in done:
+                                    record_index = pending.pop(future)
+                                    result_buffer[record_index] = (
+                                        future.result()
+                                    )
+                                    progress.update(1)
+                                while next_result_index in result_buffer:
+                                    consume(
+                                        result_buffer.pop(
+                                            next_result_index
+                                        )
+                                    )
+                                    next_result_index += 1
+
+                            for record_index, raw_payload in iter_tfrecord(
+                                path
+                            ):
+                                if record_index < selected_indices.start:
+                                    continue
+                                if record_index >= selected_indices.stop:
+                                    break
+                                future = executor.submit(
+                                    process_scenario,
+                                    str(path),
+                                    path.name,
+                                    record_index,
+                                    (
+                                        shard_global_starts[path]
+                                        + record_index
+                                    ),
+                                    raw_payload,
+                                    map_config,
+                                    size_config,
+                                    action_config,
+                                    frame_index,
+                                )
+                                pending[future] = record_index
+                                if len(pending) >= args.workers * 3:
+                                    drain_completed()
+                            while pending:
+                                drain_completed()
+                            if result_buffer:
+                                raise RuntimeError(
+                                    "Could not restore scenario order for "
+                                    f"{path}: {sorted(result_buffer)}"
+                                )
+
+                    shard_table_counts = _write_counter_tables(
+                        source_accumulator,
+                        path.name,
+                        args.frame_number,
+                        partial_paths,
+                    )
+                    if file_identity(path) != source_identity:
+                        raise RuntimeError(
+                            f"Source TFRecord changed while processing: {path}"
+                        )
+                    shard_payload = {
+                        "schema_version": (
+                            STATISTICS_SHARD_SCHEMA_VERSION
+                        ),
+                        "run_fingerprint": shard_fingerprint,
+                        "source": source_identity,
+                        "source_file": path.name,
+                        "source_order": source_order,
+                        "selection": {
+                            "start": selected_indices.start,
+                            "stop": selected_indices.stop,
+                            "count": len(selected_indices),
+                        },
+                        "raw_accumulator": raw_accumulator_payload(
+                            source_accumulator
+                        ),
+                        "aggregate": serializable_accumulator(
+                            source_accumulator
+                        ),
+                        "table_row_counts": shard_table_counts,
+                        "output_files": {
+                            key: str(output_path)
+                            for key, output_path in shard_paths.items()
+                        },
+                    }
+                    shard_payload["output_artifacts"] = {
+                        key: artifact_identity_record(
+                            partial_paths[key],
+                            logical_path=shard_paths[key],
+                        )
+                        for key in shard_paths
+                        if key != "summary"
+                    }
+                    partial_paths["summary"].write_text(
+                        json.dumps(
+                            shard_payload,
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    for key, output_path in shard_paths.items():
+                        if key != "summary":
+                            partial_paths[key].replace(output_path)
+                    partial_paths["summary"].replace(
+                        shard_paths["summary"]
+                    )
+                    merge_accumulators(aggregate, source_accumulator)
+                    for key, count in shard_table_counts.items():
+                        table_row_counts[key] += count
+                    completed_shard = shard_payload
+
+                shard_error_paths.append(shard_paths["errors"])
+                shard_manifests.append(
+                    {
+                        "source_file": path.name,
+                        "source_order": source_order,
+                        "run_fingerprint": shard_fingerprint,
+                        "summary_artifact": artifact_record(
+                            shard_paths["summary"]
+                        ),
+                    }
+                )
+                del source_accumulator
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    partial_global_paths = {
+        key: path.with_name(path.name + ".partial")
+        for key, path in global_paths.items()
+    }
+    for partial_path in partial_global_paths.values():
+        partial_path.unlink(missing_ok=True)
+    aggregate_table_counts = _write_counter_tables(
+        aggregate,
+        "ALL",
+        args.frame_number,
+        partial_global_paths,
+    )
+    for key, count in aggregate_table_counts.items():
+        table_row_counts[key] += count
+    with partial_global_paths["errors"].open(
+        "w",
+        encoding="utf-8",
+    ) as output:
+        for error_path in shard_error_paths:
+            with error_path.open("r", encoding="utf-8") as source:
+                for line in source:
+                    output.write(line)
 
     payload = {
         "schema_version": SCHEMA_VERSION,
+        "run_fingerprint": run_fingerprint,
         "input_files": [str(path) for path in paths],
+        "input_identity": input_identity,
         "frame_number": args.frame_number,
         "frame_index": frame_index,
         "workers": args.workers,
         "start_index": args.start_index,
         "max_scenarios": args.max_scenarios,
+        "resume": args.resume,
         "map_config": asdict(map_config),
         "agent_size_config": asdict(size_config),
         "agent_action_config": asdict(action_config),
         "methodology": {
             "road_context": (
-                "One mutually exclusive SDC road label at only the requested frame."
-            ),
-            "category_labels_zh": CATEGORY_LABELS_ZH,
-            "intersection_scope": (
-                "Junctions detected by the existing signalized/stop-controlled "
-                "map annotator."
-            ),
-            "parking_lot_proxy": (
-                "SDC center covered by a WOMD driveway polygon; not parking-lot "
-                "ground truth."
+                "One mutually exclusive SDC road label at the requested frame."
             ),
             "agent_scope": (
-                "Every track with a valid state at the requested frame, including SDC."
-            ),
-            "agent_size_warning": (
-                "All six requested subtypes are dimension proxies. WOMD has no axle, "
-                "motor-power, pedal, or age attributes needed for regulatory labels."
+                "Every valid agent at the requested frame is size-labeled."
             ),
             "agent_action_scope": (
-                "Every valid state of every track is labeled. Counts use agent-frame "
-                "units; valid past/future states provide turn and lane-change context."
+                "Every valid state of every track is action-labeled; counts "
+                "use agent-frame units."
             ),
-            "agent_action_reference": (
-                "Action ids, priority, valid-frame windows, and lane-change rules "
-                "follow Demand2Scenario/d2s/processor/get_action.py."
+            "storage": (
+                "Scenario details are committed per TFRecord shard; the split "
+                "summary and count tables contain bounded aggregates."
             ),
-            "agent_action_kinematics": (
-                "WOMD stores global velocity but no acceleration. Longitudinal "
-                "velocity is obtained by rotating global velocity into the agent "
-                "frame; global velocity is differentiated over valid timestamps "
-                "and rotated to obtain longitudinal acceleration."
-            ),
-        },
-        "standard_references": {
-            "vehicle": {
-                "rule": "length > 19 ft (5.7912 m) -> large-vehicle proxy",
-                "source": "AASHTO passenger-car design length via FHWA",
-                "url": (
-                    "https://highways.dot.gov/safety/hsip/xings/"
-                    "highway-rail-crossing-handbook-third-edition/"
-                    "b-appendix-components-highway-rail"
-                ),
-            },
-            "motorcycle": {
-                "rule": (
-                    "TYPE_VEHICLE box width <= 1.20 m and length <= 3.00 m "
-                    "-> motorcycle proxy"
-                ),
-                "source": (
-                    "FHWA typical motorcycle width, expanded for the rider and "
-                    "WOMD full-object bounding box"
-                ),
-                "reference_typical_max_width_m": (
-                    FHWA_MOTORCYCLE_TYPICAL_MAX_WIDTH_M
-                ),
-                "url": (
-                    "https://www.fhwa.dot.gov/policyinformation/tmguide/"
-                    "tmg_2022/Appendix-I-Motorcycle-Data-Collection-Methods.pdf"
-                ),
-            },
-            "cyclist": {
-                "rule": (
-                    "current-frame speed >= 24 km/h (6.6667 m/s) -> e-bike "
-                    "proxy; otherwise bicycle proxy"
-                ),
-                "source": "FHWA conventional-bicycle 85th-percentile speed",
-                "url": (
-                    "https://www.fhwa.dot.gov/publications/research/safety/"
-                    "pedbike/05137/chapter2.cfm"
-                ),
-            },
-            "pedestrian": {
-                "rule": "height < 4 ft 9 in (1.4478 m) -> child-height proxy",
-                "source": "NHTSA child-restraint height reference",
-                "url": (
-                    "https://www.nhtsa.gov/book/countermeasures-that-work/"
-                    "seat-belts-and-child-restraints/countermeasures/other-strategies-4"
-                ),
-            },
-            "regulatory_limit": {
-                "source": (
-                    "Motorcycle and e-bike definitions require wheel, motor-power, "
-                    "pedal, or assisted-speed attributes unavailable in WOMD; all "
-                    "reported subtypes are observational proxies."
-                ),
-                "fhwa_url": (
-                    "https://www.fhwa.dot.gov/policyinformation/tmguide/"
-                    "tmg_2013/vehicle-types.cfm"
-                ),
-                "cpsc_url": "https://www.cpsc.gov/FAQ/Bicycles",
-            },
         },
         "aggregate": serializable_accumulator(aggregate),
-        "table_row_counts": {
-            "road_counts": len(road_rows),
-            "agent_counts": len(agent_rows),
-            "action_counts": len(action_rows),
-            "action_counts_by_frame": len(action_frame_rows),
+        "table_row_counts": table_row_counts,
+        "shard_output_directory": str(shards_dir),
+        "shard_manifests": shard_manifests,
+        "output_files": {
+            key: str(path) for key, path in global_paths.items()
         },
-        "output_files": {key: str(path) for key, path in output_paths.items()},
     }
-    working_paths["summary"].write_text(
+    payload["output_artifacts"] = {
+        key: artifact_identity_record(
+            partial_global_paths[key],
+            logical_path=global_paths[key],
+        )
+        for key in global_paths
+        if key != "summary"
+    }
+    partial_global_paths["summary"].write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    for key in output_paths:
+    for key, output_path in global_paths.items():
         if key != "summary":
-            working_paths[key].replace(output_paths[key])
-    working_paths["summary"].replace(output_paths["summary"])
+            partial_global_paths[key].replace(output_path)
+    partial_global_paths["summary"].replace(global_paths["summary"])
     return payload
 
 
