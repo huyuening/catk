@@ -1158,14 +1158,12 @@ def run_statistics(args: argparse.Namespace) -> dict:
             },
         },
         "aggregate": serializable_accumulator(aggregate),
-        "per_source": {
-            source: serializable_accumulator(accumulator)
-            for source, accumulator in sorted(by_source.items())
+        "table_row_counts": {
+            "road_counts": len(road_rows),
+            "agent_counts": len(agent_rows),
+            "action_counts": len(action_rows),
+            "action_counts_by_frame": len(action_frame_rows),
         },
-        "road_count_rows": road_rows,
-        "agent_count_rows": agent_rows,
-        "agent_action_count_rows": action_rows,
-        "agent_action_count_rows_by_frame": action_frame_rows,
         "output_files": {key: str(path) for key, path in output_paths.items()},
     }
     working_paths["summary"].write_text(

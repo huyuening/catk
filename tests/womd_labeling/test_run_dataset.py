@@ -31,7 +31,19 @@ def test_routes_each_split_to_isolated_stage_outputs(tmp_path, monkeypatch):
 
     def fake_statistics(args):
         calls["statistics"].append(args)
-        return {"aggregate": {"errors": 0}}
+        return {
+            "schema_version": "statistics-v1",
+            "aggregate": {
+                "scenarios": 2,
+                "errors": 0,
+                "road_counts": {"ROAD_SEGMENT": 2},
+                "agent_size_counts": {"TYPE_VEHICLE\tSMALL": 3},
+                "agent_action_counts": {"TYPE_VEHICLE\t6": 22},
+                "action_diagnostics": {"valid_state_frames": 22},
+            },
+            "road_count_rows": [{"large": "payload"}] * 100,
+            "output_files": {"summary": str(args.output_dir / "summary.json")},
+        }
 
     def fake_scenarios(args):
         calls["scenario_visualizations"].append(args)
@@ -83,6 +95,13 @@ def test_routes_each_split_to_isolated_stage_outputs(tmp_path, monkeypatch):
     assert set(summary["splits"]) == {"training", "validation", "testing"}
     saved = json.loads((output_root / "run_summary.json").read_text())
     assert saved["status"] == "complete"
+    for split in ("training", "validation", "testing"):
+        stage = saved["splits"][split]["stages"]["statistics"]
+        assert "road_count_rows" not in stage
+        assert stage["scenarios"] == 2
+        assert stage["agent_frame_count"] == 22
+        assert stage["output_files"]["summary"].endswith("summary.json")
+    assert (output_root / "run_summary.json").stat().st_size < 20_000
 
 
 def test_missing_requested_split_is_rejected_before_stages_run(tmp_path):

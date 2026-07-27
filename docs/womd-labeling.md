@@ -128,8 +128,9 @@ python -m src.womd_labeling.plot_statistics --help
   run_summary.json
 ```
 
-`run_summary.json` 在每个 split 完成后原子更新，并记录输入、阶段结果、
-输出位置与错误数。大文件先写入 `.partial`，完成后才原子改名。
+`run_summary.json` 在每个 split 完成后原子更新，并仅记录输入、阶段计数、
+输出位置与错误数，大小不会随逐帧明细线性增长。统计明细保留在压缩 CSV
+中；各阶段的大文件先写入 `.partial`，完成后才原子改名。
 
 ## 单场景调试
 

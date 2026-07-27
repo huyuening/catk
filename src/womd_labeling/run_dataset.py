@@ -143,6 +143,100 @@ def _stage_error_count(stage: str, result: dict) -> int:
     return int(result.get("errors", 0))
 
 
+def _select_keys(payload: dict, keys: tuple[str, ...]) -> dict:
+    return {key: payload[key] for key in keys if key in payload}
+
+
+def _compact_stage_result(stage: str, result: dict) -> dict:
+    """Keep run_summary.json bounded independently of dataset size."""
+    if stage == "annotations":
+        return _select_keys(
+            result,
+            (
+                "schema_version",
+                "summary_path",
+                "shards_selected",
+                "shards_written",
+                "shards_skipped",
+                "scenarios_written",
+                "scenarios_skipped",
+                "scenarios_completed",
+                "errors",
+                "junctions",
+                "signalized_junctions",
+                "stop_controlled_junctions",
+                "roundabout_junctions",
+                "geometric_junctions",
+                "ego_frames",
+                "ego_valid_frames",
+                "region_counts",
+                "road_environment_counts",
+                "road_environment_subtype_counts",
+            ),
+        )
+    if stage == "statistics":
+        aggregate = result.get("aggregate", {})
+        action_diagnostics = aggregate.get("action_diagnostics", {})
+        compact = _select_keys(
+            result,
+            (
+                "schema_version",
+                "frame_number",
+                "frame_index",
+                "table_row_counts",
+                "output_files",
+                "resumed",
+            ),
+        )
+        compact.update(
+            {
+                "scenarios": int(aggregate.get("scenarios", 0)),
+                "errors": int(aggregate.get("errors", 0)),
+                "road_counts": aggregate.get("road_counts", {}),
+                "agent_size_counts": aggregate.get(
+                    "agent_size_counts", {}
+                ),
+                "agent_action_counts": aggregate.get(
+                    "agent_action_counts", {}
+                ),
+                "agent_frame_count": int(
+                    action_diagnostics.get("valid_state_frames", 0)
+                ),
+            }
+        )
+        return compact
+    if stage == "scenario-visualizations":
+        return _select_keys(
+            result,
+            (
+                "output_dir",
+                "preferred_frame_index",
+                "workers",
+                "mp_start_method",
+                "scenarios_considered",
+                "images_written",
+                "images_skipped",
+                "errors",
+                "region_counts",
+            ),
+        )
+    if stage == "aggregate-visualization":
+        return _select_keys(
+            result,
+            (
+                "statistics_dir",
+                "road_scenarios",
+                "road_unknown",
+                "annotation_errors",
+                "agent_count",
+                "agent_frame_count",
+                "output_files",
+                "resumed",
+            ),
+        )
+    raise ValueError(f"Unsupported stage: {stage}")
+
+
 def _validate_args(args: argparse.Namespace) -> None:
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
@@ -243,7 +337,9 @@ def run_dataset(args: argparse.Namespace) -> dict:
                 if args.overwrite:
                     stage_argv.append("--overwrite")
                 result = annotate_paths(parse_annotation_args(stage_argv))
-                split_summary["stages"]["annotations"] = result
+                split_summary["stages"]["annotations"] = (
+                    _compact_stage_result("annotations", result)
+                )
                 split_summary["errors"] += _stage_error_count(
                     "annotations", result
                 )
@@ -269,7 +365,9 @@ def run_dataset(args: argparse.Namespace) -> dict:
                     result = run_statistics(
                         parse_statistics_args(stage_argv)
                     )
-                split_summary["stages"]["statistics"] = result
+                split_summary["stages"]["statistics"] = (
+                    _compact_stage_result("statistics", result)
+                )
                 split_summary["errors"] += _stage_error_count(
                     "statistics", result
                 )
@@ -299,7 +397,12 @@ def run_dataset(args: argparse.Namespace) -> dict:
                 result = visualize_paths(
                     parse_visualization_args(stage_argv)
                 )
-                split_summary["stages"]["scenario-visualizations"] = result
+                split_summary["stages"]["scenario-visualizations"] = (
+                    _compact_stage_result(
+                        "scenario-visualizations",
+                        result,
+                    )
+                )
                 split_summary["errors"] += _stage_error_count(
                     "scenario-visualizations", result
                 )
@@ -322,7 +425,12 @@ def run_dataset(args: argparse.Namespace) -> dict:
                     if args.overwrite:
                         stage_argv.append("--overwrite")
                     result = plot_statistics(parse_plot_args(stage_argv))
-                split_summary["stages"]["aggregate-visualization"] = result
+                split_summary["stages"]["aggregate-visualization"] = (
+                    _compact_stage_result(
+                        "aggregate-visualization",
+                        result,
+                    )
+                )
                 split_summary["errors"] += _stage_error_count(
                     "aggregate-visualization", result
                 )

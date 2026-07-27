@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import json
 
 import pytest
 
@@ -42,6 +43,20 @@ def test_writes_consistent_road_size_and_action_statistics(tmp_path):
     assert sum(aggregate["road_counts"].values()) == 1
     assert sum(aggregate["agent_size_counts"].values()) == 1
     assert aggregate["action_diagnostics"]["valid_state_frames"] == 11
+    assert summary["table_row_counts"] == {
+        "road_counts": 22,
+        "agent_counts": 18,
+        "action_counts": 120,
+        "action_counts_by_frame": 1320,
+    }
+    for redundant_key in (
+        "per_source",
+        "road_count_rows",
+        "agent_count_rows",
+        "agent_action_count_rows",
+        "agent_action_count_rows_by_frame",
+    ):
+        assert redundant_key not in summary
     for output_path in summary["output_files"].values():
         assert output_path.endswith(
             (
@@ -62,6 +77,10 @@ def test_writes_consistent_road_size_and_action_statistics(tmp_path):
         action_rows = list(csv.DictReader(stream))
     assert len(action_rows) == 11
     assert {row["scenario_id"] for row in action_rows} == {"scenario-a"}
+
+    saved = json.loads((output_dir / "summary.json").read_text())
+    assert saved == summary
+    assert (output_dir / "summary.json").stat().st_size < 100_000
 
 
 def test_requires_overwrite_for_complete_statistics_directory(tmp_path):
