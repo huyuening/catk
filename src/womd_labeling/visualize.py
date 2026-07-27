@@ -454,7 +454,13 @@ def visualize_paths(args: argparse.Namespace) -> dict:
         "region_counts": Counter(),
         "visualization_config": asdict(config),
     }
-    manifest_rows = []
+    manifest_path = output_dir / "manifest.csv"
+    manifest_partial = manifest_path.with_name(manifest_path.name + ".partial")
+    manifest_events = manifest_path.with_name(
+        manifest_path.name + ".events.partial"
+    )
+    manifest_events.unlink(missing_ok=True)
+    found_requested_ids = set()
     global_index = 0
     selected = 0
     executor = (
@@ -466,6 +472,7 @@ def visualize_paths(args: argparse.Namespace) -> dict:
         else None
     )
     pending = {}
+    manifest_event_stream = manifest_events.open("w", encoding="utf-8")
     try:
         with tqdm(
             total=total,
@@ -499,18 +506,21 @@ def visualize_paths(args: argparse.Namespace) -> dict:
                     region_type = result["region_type"]
                     region_summary = result["summary"]
                     summary["region_counts"][region_type] += 1
-                manifest_rows.append(
-                    {
-                        "scenario_index": metadata["scenario_index"],
-                        "scenario_id": metadata["scenario_id"],
-                        "frame_index": frame_index,
-                        "region_type": region_type,
-                        "annotation_summary": region_summary,
-                        "status": status,
-                        "image_path": metadata["output_path"].name,
-                        "error": error,
-                    }
+                row = {
+                    "scenario_index": metadata["scenario_index"],
+                    "scenario_id": metadata["scenario_id"],
+                    "frame_index": frame_index,
+                    "region_type": region_type,
+                    "annotation_summary": region_summary,
+                    "status": status,
+                    "image_path": metadata["output_path"].name,
+                    "error": error,
+                }
+                manifest_event_stream.write(
+                    json.dumps(row, ensure_ascii=False) + "\n"
                 )
+                if requested_ids is not None:
+                    found_requested_ids.add(metadata["scenario_id"])
                 progress.update(1)
 
             def drain_pending() -> None:
@@ -663,13 +673,15 @@ def visualize_paths(args: argparse.Namespace) -> dict:
     finally:
         if executor is not None:
             executor.shutdown()
+        manifest_event_stream.close()
 
     if requested_ids is not None:
-        found_ids = {row["scenario_id"] for row in manifest_rows}
-        for missing_id in sorted(requested_ids - found_ids):
-            summary["errors"] += 1
-            manifest_rows.append(
-                {
+        with manifest_events.open("a", encoding="utf-8") as event_stream:
+            for missing_id in sorted(
+                requested_ids - found_requested_ids
+            ):
+                summary["errors"] += 1
+                row = {
                     "scenario_index": "",
                     "scenario_id": missing_id,
                     "frame_index": "",
@@ -679,18 +691,10 @@ def visualize_paths(args: argparse.Namespace) -> dict:
                     "image_path": "",
                     "error": "Scenario ID was not found in TFRecord inputs",
                 }
-            )
+                event_stream.write(
+                    json.dumps(row, ensure_ascii=False) + "\n"
+                )
 
-    manifest_rows.sort(
-        key=lambda row: (
-            row["scenario_index"] == "",
-            row["scenario_index"] if row["scenario_index"] != "" else 0,
-            row["scenario_id"],
-        )
-    )
-
-    manifest_path = output_dir / "manifest.csv"
-    manifest_partial = manifest_path.with_name(manifest_path.name + ".partial")
     with manifest_partial.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(
             stream,
@@ -706,8 +710,11 @@ def visualize_paths(args: argparse.Namespace) -> dict:
             ],
         )
         writer.writeheader()
-        writer.writerows(manifest_rows)
+        with manifest_events.open("r", encoding="utf-8") as events:
+            for line in events:
+                writer.writerow(json.loads(line))
     manifest_partial.replace(manifest_path)
+    manifest_events.unlink()
 
     summary["region_counts"] = dict(sorted(summary["region_counts"].items()))
     summary_path = output_dir / "summary.json"

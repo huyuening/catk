@@ -45,8 +45,9 @@ python -m src.womd_labeling.run_dataset \
   --workers 24
 ```
 
-逐场景绘图按 TFRecord 分片懒加载标注；即使标注覆盖完整数据集，内存中也
-只保留当前分片，而不会一次载入整个 split。
+逐场景绘图按 TFRecord 分片懒加载标注，并将 manifest 逐行流式落盘；
+即使标注和图片覆盖完整数据集，内存中也只保留当前分片及有限个并行任务，
+不会一次载入整个 split。
 
 若还要为每个场景都输出一张 PNG，增加：
 
