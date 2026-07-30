@@ -200,12 +200,24 @@ The local validation config follows the paper's 2% validation protocol (880 scen
 
 `pre_bc` and `clsft` validate after every epoch on a deterministic 10% prefix
 of the validation loader. Open-loop loss and accuracy remain enabled, and
-closed-loop validation uses TrajTok Fast WOSAC 2025 with 32 rollouts and
-inference `K=48`.
+closed-loop validation uses CatK's embedded Fast WOSAC 2025 backend (sourced
+from TrajTok) with 32 rollouts and inference `K=48`. No TrajTok checkout or
+`TRAJTOK_ROOT` setting is required.
 
 The evaluator strictly reads preprocessed scenario dictionaries from
-`/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario/validation_gt`. Override
-the location when necessary:
+`${CACHE_ROOT}/validation_gt`. Existing TrajTok-generated `validation_gt`
+artifacts remain compatible. CatK now generates the same artifacts whenever
+the validation split is preprocessed:
+
+```bash
+python -m src.data_preprocess \
+  --split validation \
+  --num_workers 12 \
+  --input_dir /path/to/womd/uncompressed/scenario \
+  --output_dir /path/to/catk_cache
+```
+
+Override the ground-truth location when necessary:
 
 ```bash
 FAST_WOSAC_GT_DIR=/path/to/validation_gt \
@@ -222,9 +234,15 @@ validation.
 
 ### Fast WOSAC 2025 validation
 
-CatK can use TrajTok's GPU-accelerated WOSAC 2025 evaluator directly from a sibling checkout. By default, the inference config expects CatK at `/root/workspace/catk`, TrajTok at `/root/workspace/TrajTok`, and the CatK cache at `/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario`. It evaluates the complete validation split with 32 rollouts per scenario and inference `K=48`. It first looks for TrajTok-preprocessed ground truth in `${CACHE_ROOT}/validation_gt`; when that directory or an individual scenario is unavailable, it falls back to CatK's per-scenario TFRecord.
+CatK vendors the GPU-accelerated Fast WOSAC backend and its 2024/2025 metric
+configs, so validation is self-contained. The embedded code is sourced from
+[TrajTok commit `5920c89e`](https://github.com/Thinklab-SJTU/TrajTok/commit/5920c89e26b62e8337512c253ab59efee995a496).
+The default inference config evaluates the complete validation split with 32
+rollouts per scenario and inference `K=48`. It strictly reads
+`${CACHE_ROOT}/validation_gt`; a missing directory, malformed artifact, or
+missing scenario is reported as an error.
 
-Set the checkpoint through the environment for a TrajTok-style command:
+Set the checkpoint through the environment for the compact command:
 
 ```
 CATK_CKPT=/path/to/model.ckpt \
@@ -244,7 +262,6 @@ The inference config uses all visible GPUs through single-node DDP and logs to W
 
 ```
 CACHE_ROOT=/path/to/catk_cache \
-TRAJTOK_ROOT=/path/to/TrajTok \
 FAST_WOSAC_GT_DIR=/path/to/validation_gt \
 python run.py \
   experiment=inference \
@@ -255,7 +272,8 @@ python run.py \
   logger.wandb.entity=YOUR_WANDB_ENTITY
 ```
 
-TrajTok Fast WOSAC is intended for rapid local evaluation. Use the official WOSAC evaluation server for final competition results.
+The embedded Fast WOSAC implementation is intended for rapid local evaluation.
+Use the official WOSAC evaluation server for final competition results.
 
 #### Pre-BC + endpoint interpolation
 
@@ -292,7 +310,12 @@ python run.py experiment=inference task_name=pre_bc_baseline
 
 Both commands use Fast WOSAC 2025, the complete validation split, 32 rollouts, inference `K=48`, and all visible GPUs. The terminal and W&B run contain `val_closed/wosac/realism_meta_metric` and all component metrics. The endpoint method and thresholds can be overridden under `model.model_config.decoder.endpoint_interpolation`.
 
-To inspect one validation scenario and one agent, use the CatK comparison tool. It generates one CatK token path, applies endpoint interpolation offline to that exact rollout, then reuses TrajTok's original six-panel plot for XY trajectory, heading, linear speed, linear acceleration, angular speed, and angular acceleration:
+To inspect one validation scenario and one agent, use the CatK comparison tool.
+It generates one CatK token path, applies endpoint interpolation offline to
+that exact rollout, then reuses TrajTok's original six-panel plot for XY
+trajectory, heading, linear speed, linear acceleration, angular speed, and
+angular acceleration. Unlike Fast WOSAC evaluation, this optional plotting
+tool still requires a TrajTok checkout:
 
 ```
 CATK_CKPT=/path/to/pre_bc.ckpt \
