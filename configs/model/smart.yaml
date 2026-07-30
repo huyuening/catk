@@ -13,7 +13,8 @@ model_config:
   val_closed_loop: true
   wosac_backend: official # {official, fast}
   wosac_metrics_version: "2024"
-  trajtok_root: ${oc.env:TRAJTOK_ROOT,/root/workspace/TrajTok}
+  # Deprecated compatibility field; embedded Fast WOSAC ignores this value.
+  trajtok_root: null
   fast_wosac_gt_dir: null
   fast_wosac_require_preprocessed_gt: false
   # Optional causal dynamics context reconstructed from raw 10 Hz history

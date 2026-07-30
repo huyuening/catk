@@ -75,9 +75,6 @@ class SMART(LightningModule):
         if self.wosac_backend == "fast":
             self.wosac_metrics = FastWOSACMetrics(
                 "val_closed",
-                trajtok_root=model_config.get(
-                    "trajtok_root", "/root/workspace/TrajTok"
-                ),
                 version=self.wosac_metrics_version,
                 gt_scenario_dir=model_config.get("fast_wosac_gt_dir"),
                 require_preprocessed_gt=model_config.get(

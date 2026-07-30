@@ -49,6 +49,20 @@ class FastWOSACStrictIntegrationTest(unittest.TestCase):
             ast.unparse(keyword.value),
         )
 
+    def test_smart_does_not_forward_external_trajtok_root(self):
+        tree = ast.parse((ROOT / "src/smart/model/smart.py").read_text())
+        call = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "FastWOSACMetrics"
+        )
+        self.assertNotIn(
+            "trajtok_root",
+            {keyword.arg for keyword in call.keywords},
+        )
+
     def test_model_default_preserves_optional_gt_behavior(self):
         config = yaml.safe_load(
             (ROOT / "configs/model/smart.yaml").read_text()

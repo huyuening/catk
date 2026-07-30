@@ -109,6 +109,16 @@ class TrainingFastWOSACConfigTest(unittest.TestCase):
                 "/tmp/custom-validation-gt",
             )
 
+    def test_fast_wosac_has_no_external_runtime_root(self):
+        model = self._load("configs/model/smart.yaml")["model_config"]
+        inference = self._load("configs/experiment/inference.yaml")
+
+        self.assertIsNone(model["trajtok_root"])
+        self.assertNotIn(
+            "trajtok_root",
+            inference["model"]["model_config"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

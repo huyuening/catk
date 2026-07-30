@@ -11,7 +11,6 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-import sys
 import warnings
 from pathlib import Path
 from typing import Iterable, List
@@ -22,6 +21,13 @@ from torch import Tensor
 from torchmetrics import Metric
 from waymo_open_dataset.protos import scenario_pb2, sim_agents_metrics_pb2
 
+from src.smart.metrics.fast_wosac_backend.fast_sim_agents_metrics import (
+    metrics as fast_metrics,
+)
+from src.smart.metrics.fast_wosac_backend.scenario_gt_converter import (
+    extract_gt_scenario,
+    gt_scenario_to_device,
+)
 from src.smart.metrics.preprocessed_scenario_gt import PreprocessedScenarioGT
 
 
@@ -62,42 +68,14 @@ _2025_REQUIRED_GT_KEYS = {
 }
 
 
-def _load_trajtok_modules(trajtok_root: str):
-    root = Path(trajtok_root).expanduser().resolve()
-    package_dir = root / "wosac_fast_eval_tool"
-    if not package_dir.is_dir():
-        raise FileNotFoundError(
-            "TrajTok fast WOSAC package not found at "
-            f"{package_dir}. Set model.model_config.trajtok_root or the "
-            "TRAJTOK_ROOT environment variable."
-        )
-
-    root_str = str(root)
-    if root_str not in sys.path:
-        # Append instead of prepend so CatK's own top-level `src` package keeps
-        # priority over TrajTok's package with the same name.
-        sys.path.append(root_str)
-
-    from wosac_fast_eval_tool.fast_sim_agents_metrics import (  # noqa: PLC0415
-        metrics as fast_metrics,
-    )
-    from wosac_fast_eval_tool.scenario_gt_converter import (  # noqa: PLC0415
-        extract_gt_scenario,
-        gt_scenario_to_device,
-    )
-
-    return fast_metrics, extract_gt_scenario, gt_scenario_to_device
-
-
 class FastWOSACMetrics(Metric):
-    """GPU-accelerated WOSAC metrics backed by TrajTok's evaluator."""
+    """GPU-accelerated WOSAC metrics backed by CatK's embedded evaluator."""
 
     full_state_update = False
 
     def __init__(
         self,
         prefix: str,
-        trajtok_root: str,
         version: str = "2025",
         gt_scenario_dir: str | None = None,
         require_preprocessed_gt: bool = False,
@@ -107,7 +85,6 @@ class FastWOSACMetrics(Metric):
             raise ValueError(f"Unsupported WOSAC version: {version}")
 
         self.prefix = prefix
-        self.trajtok_root = trajtok_root
         self.version = version
         self.preprocessed_gt = PreprocessedScenarioGT(
             gt_scenario_dir,
@@ -118,7 +95,6 @@ class FastWOSACMetrics(Metric):
         if version == "2025":
             self.metric_names.extend(_2025_METRIC_NAMES)
 
-        fast_metrics, _, _ = _load_trajtok_modules(trajtok_root)
         config_name = (
             "challenge_2025_sim_agents_config.textproto"
             if version == "2025"
@@ -234,9 +210,6 @@ class FastWOSACMetrics(Metric):
                 f"Got {len(files)} TFRecords for {len(ids)} scenario IDs."
             )
 
-        fast_metrics, extract_gt_scenario, gt_scenario_to_device = (
-            _load_trajtok_modules(self.trajtok_root)
-        )
         num_scenarios = len(ids)
         agent_ids = self._unbatch_agents(
             agent_id,
@@ -267,10 +240,10 @@ class FastWOSACMetrics(Metric):
                 missing_keys = _2025_REQUIRED_GT_KEYS.difference(gt_scenario)
                 if missing_keys:
                     raise KeyError(
-                        "TrajTok validation GT is missing WOSAC 2025 fields "
+                        "Fast WOSAC validation GT is missing WOSAC 2025 fields "
                         f"{sorted(missing_keys)} for scenario {expected_id}. "
-                        "Regenerate it with TrajTok's current "
-                        "scenario_gt_converter."
+                        "Regenerate validation_gt with CatK's current "
+                        "src.data_preprocess."
                     )
             if gt_scenario["scenario_id"] != expected_id:
                 raise ValueError(
@@ -319,7 +292,6 @@ class FastWOSACMetrics(Metric):
                 for metric_name, value in mean_metrics.items()
             },
         )
-        fast_metrics, _, _ = _load_trajtok_modules(self.trajtok_root)
         bucketed = fast_metrics.aggregate_metrics_to_buckets(
             self.wosac_config,
             mean_proto,
