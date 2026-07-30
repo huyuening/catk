@@ -15,6 +15,7 @@ model_config:
   wosac_metrics_version: "2024"
   trajtok_root: ${oc.env:TRAJTOK_ROOT,/root/workspace/TrajTok}
   fast_wosac_gt_dir: null
+  fast_wosac_require_preprocessed_gt: false
   # Optional causal dynamics context reconstructed from raw 10 Hz history
   # during cache generation. Disabled by default for the original CatK model.
   history_dynamics:

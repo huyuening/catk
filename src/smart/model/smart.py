@@ -80,6 +80,10 @@ class SMART(LightningModule):
                 ),
                 version=self.wosac_metrics_version,
                 gt_scenario_dir=model_config.get("fast_wosac_gt_dir"),
+                require_preprocessed_gt=model_config.get(
+                    "fast_wosac_require_preprocessed_gt",
+                    False,
+                ),
             )
         elif self.wosac_backend == "official":
             if self.wosac_metrics_version != "2024":

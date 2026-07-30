@@ -11,7 +11,6 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-import pickle
 import sys
 import warnings
 from pathlib import Path
@@ -22,6 +21,8 @@ from google.protobuf import text_format
 from torch import Tensor
 from torchmetrics import Metric
 from waymo_open_dataset.protos import scenario_pb2, sim_agents_metrics_pb2
+
+from src.smart.metrics.preprocessed_scenario_gt import PreprocessedScenarioGT
 
 
 _COMMON_METRIC_NAMES = (
@@ -99,6 +100,7 @@ class FastWOSACMetrics(Metric):
         trajtok_root: str,
         version: str = "2025",
         gt_scenario_dir: str | None = None,
+        require_preprocessed_gt: bool = False,
     ) -> None:
         super().__init__()
         if version not in {"2024", "2025"}:
@@ -107,18 +109,11 @@ class FastWOSACMetrics(Metric):
         self.prefix = prefix
         self.trajtok_root = trajtok_root
         self.version = version
-        self.gt_scenario_dir = (
-            Path(gt_scenario_dir).expanduser().resolve()
-            if gt_scenario_dir
-            else None
+        self.preprocessed_gt = PreprocessedScenarioGT(
+            gt_scenario_dir,
+            required=require_preprocessed_gt,
         )
-        if self.gt_scenario_dir is not None and not self.gt_scenario_dir.is_dir():
-            warnings.warn(
-                "Fast WOSAC GT directory does not exist; falling back to "
-                f"per-scenario TFRecords: {self.gt_scenario_dir}",
-                stacklevel=2,
-            )
-            self.gt_scenario_dir = None
+        self.gt_scenario_dir = self.preprocessed_gt.directory
         self.metric_names = list(_COMMON_METRIC_NAMES)
         if version == "2025":
             self.metric_names.extend(_2025_METRIC_NAMES)
@@ -168,19 +163,9 @@ class FastWOSACMetrics(Metric):
         scenario_id: str,
         extract_gt_scenario,
     ) -> dict:
-        if self.gt_scenario_dir is not None:
-            gt_path = self.gt_scenario_dir / f"{scenario_id}.pkl"
-            if gt_path.is_file():
-                with gt_path.open("rb") as gt_file:
-                    gt_scenario = pickle.load(gt_file)
-                if hasattr(gt_scenario, "value"):
-                    gt_scenario = gt_scenario.value
-                if not isinstance(gt_scenario, dict):
-                    raise TypeError(
-                        f"Fast WOSAC GT must be a dict, got "
-                        f"{type(gt_scenario).__name__}: {gt_path}"
-                    )
-                return gt_scenario
+        gt_scenario = self.preprocessed_gt.load(scenario_id)
+        if gt_scenario is not None:
+            return gt_scenario
 
         import tensorflow as tf  # noqa: PLC0415
 
