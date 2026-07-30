@@ -196,6 +196,30 @@ bash scripts/train.sh ckpt_path=/path/to/pretrained/last.ckpt
 
 The local validation config follows the paper's 2% validation protocol (880 scenarios) with inference `K=40`. WOSAC submission generation keeps the leaderboard setting `K=48` and temperature `1.0`. The ego GMM configs likewise follow the paper with 32 BC epochs followed by 5 CAT-3 fine-tuning epochs.
 
+### Training-time Fast WOSAC validation
+
+`pre_bc` and `clsft` validate after every epoch on a deterministic 10% prefix
+of the validation loader. Open-loop loss and accuracy remain enabled, and
+closed-loop validation uses TrajTok Fast WOSAC 2025 with 32 rollouts and
+inference `K=48`.
+
+The evaluator strictly reads preprocessed scenario dictionaries from
+`/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario/validation_gt`. Override
+the location when necessary:
+
+```bash
+FAST_WOSAC_GT_DIR=/path/to/validation_gt \
+MY_EXPERIMENT=pre_bc \
+bash scripts/train.sh
+```
+
+A missing directory or scenario artifact is an error; training-time
+validation never falls back to raw TFRecords. Each epoch evaluates roughly
+4,400 scenarios, so this is substantially slower than the previous limited
+validation. Override `trainer.limit_val_batches` for a different fraction, or
+set `model.model_config.val_closed_loop=false` to retain only open-loop
+validation.
+
 ### Fast WOSAC 2025 validation
 
 CatK can use TrajTok's GPU-accelerated WOSAC 2025 evaluator directly from a sibling checkout. By default, the inference config expects CatK at `/root/workspace/catk`, TrajTok at `/root/workspace/TrajTok`, and the CatK cache at `/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario`. It evaluates the complete validation split with 32 rollouts per scenario and inference `K=48`. It first looks for TrajTok-preprocessed ground truth in `${CACHE_ROOT}/validation_gt`; when that directory or an individual scenario is unavailable, it falls back to CatK's per-scenario TFRecord.
