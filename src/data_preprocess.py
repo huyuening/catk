@@ -26,6 +26,9 @@ from tqdm import tqdm
 from waymo_open_dataset.protos import scenario_pb2
 
 from src.agent_preprocessing import get_agent_features
+from src.smart.metrics.fast_wosac_backend.scenario_gt_converter import (
+    extract_gt_scenario,
+)
 from src.smart.utils.geometry import wrap_angle
 from src.smart.utils.preprocess import get_polylines_from_polygon, preprocess_map
 
@@ -377,6 +380,7 @@ def wm2argo(
     split,
     output_dir,
     output_dir_tfrecords_splitted,
+    output_dir_gt=None,
     history_dynamics_filter_strength=None,
     history_dynamics_max_gap_frames=None,
 ):
@@ -420,6 +424,11 @@ def wm2argo(
             with tf.io.TFRecordWriter(file_name.as_posix()) as file_writer:
                 file_writer.write(tf_data)
 
+        if output_dir_gt is not None:
+            gt = extract_gt_scenario(scenario)
+            with (output_dir_gt / f"{scenario_id}.pkl").open("wb") as handle:
+                pickle.dump(gt, handle)
+
 
 def batch_process9s_transformer(
     input_dir,
@@ -431,9 +440,12 @@ def batch_process9s_transformer(
 ):
     output_dir = Path(output_dir)
     output_dir_tfrecords_splitted = None
+    output_dir_gt = None
     if split == "validation":
         output_dir_tfrecords_splitted = output_dir / "validation_tfrecords_splitted"
         output_dir_tfrecords_splitted.mkdir(exist_ok=True, parents=True)
+        output_dir_gt = output_dir / "validation_gt"
+        output_dir_gt.mkdir(exist_ok=True, parents=True)
     output_dir = output_dir / split
     output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -444,6 +456,7 @@ def batch_process9s_transformer(
         split=split,
         output_dir=output_dir,
         output_dir_tfrecords_splitted=output_dir_tfrecords_splitted,
+        output_dir_gt=output_dir_gt,
         history_dynamics_filter_strength=history_dynamics_filter_strength,
         history_dynamics_max_gap_frames=history_dynamics_max_gap_frames,
     )
