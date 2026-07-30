@@ -14,3 +14,6 @@ output_dir: ${hydra:runtime.output_dir}
 
 # path to data directory
 cache_root: /scratch/cache/SMART
+
+# TrajTok-preprocessed GT is independent of alternative CatK cache roots.
+validation_gt_dir: ${oc.env:FAST_WOSAC_GT_DIR,/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario/validation_gt}

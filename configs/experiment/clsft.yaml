@@ -8,6 +8,18 @@ model:
   model_config:
     lr: 5e-5
     lr_min_ratio: 0.05
+    n_rollout_closed_val: 32
+    n_batch_wosac_metric: -1
+    val_open_loop: true
+    val_closed_loop: true
+    wosac_backend: fast
+    wosac_metrics_version: "2025"
+    fast_wosac_gt_dir: ${paths.validation_gt_dir}
+    fast_wosac_require_preprocessed_gt: true
+    validation_rollout_sampling:
+      criterium: topk_prob
+      num_k: 48
+      temp: 1.0
     token_processor:
       map_token_sampling: # open-loop
         num_k: 1 # for k nearest neighbors
@@ -31,7 +43,7 @@ ckpt_path: BC_PRETRAINED_MODEL.ckpt
 
 trainer:
   limit_train_batches: 1.0
-  limit_val_batches: 50
+  limit_val_batches: 0.1
   check_val_every_n_epoch: 1
   # Paper: CAT-32 closed-loop supervised fine-tuning for 10 epochs.
   max_epochs: 10

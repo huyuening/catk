@@ -8,6 +8,18 @@ model:
   model_config:
     lr: 5e-4
     lr_min_ratio: 1e-2
+    n_rollout_closed_val: 32
+    n_batch_wosac_metric: -1
+    val_open_loop: true
+    val_closed_loop: true
+    wosac_backend: fast
+    wosac_metrics_version: "2025"
+    fast_wosac_gt_dir: ${paths.validation_gt_dir}
+    fast_wosac_require_preprocessed_gt: true
+    validation_rollout_sampling:
+      criterium: topk_prob
+      num_k: 48
+      temp: 1.0
     token_processor:
       map_token_sampling: # open-loop
         num_k: 1 # for k nearest neighbors
