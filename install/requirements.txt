@@ -27,6 +27,7 @@ hydra-colorlog==1.2.0 # MIT License: https://github.com/facebookresearch/hydra/b
 # logging
 wandb==0.17.9 # MIT License: https://github.com/wandb/wandb/blob/main/LICENSE
 rich==13.8.0 # MIT License: https://github.com/Textualize/rich/blob/master/LICENSE
+transformers==4.44.2 # Apache License 2.0: https://github.com/huggingface/transformers/blob/main/LICENSE
 
 
 # License for packages installed with command line
