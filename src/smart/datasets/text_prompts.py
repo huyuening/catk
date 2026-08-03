@@ -92,6 +92,28 @@ def scene_bucket(scene_id: str) -> int:
     return int.from_bytes(digest[:4], "big") % 100
 
 
+def flatten_batched_prompts(value: object) -> List[str]:
+    """Flatten PyG's nested string collation in graph and agent order."""
+
+    flattened: List[str] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, str):
+            flattened.append(item)
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+            return
+        raise TypeError(
+            "text prompts must contain only string leaves, "
+            f"got {type(item).__name__}"
+        )
+
+    visit(value)
+    return flattened
+
+
 @dataclass(frozen=True)
 class ActionInterval:
     agent_id: str
@@ -395,5 +417,6 @@ class ECoSimTagPromptStore:
 __all__ = [
     "ActionInterval",
     "ECoSimTagPromptStore",
+    "flatten_batched_prompts",
     "scene_bucket",
 ]

@@ -11,3 +11,8 @@ val_raw_dir: ${paths.cache_root}/validation
 val_tfrecords_splitted: ${paths.cache_root}/validation_tfrecords_splitted
 test_raw_dir: ${paths.cache_root}/testing
 train_max_num: 32
+text_prompt_root: null
+train_text_mapping_path: null
+val_text_mapping_path: null
+tag_prompt_subdir: auto
+tag_sentence_style: ordered

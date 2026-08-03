@@ -37,6 +37,11 @@ class MultiDataModule(LightningDataModule):
         pin_memory: bool,
         persistent_workers: bool,
         train_max_num: int,
+        text_prompt_root: Optional[str] = None,
+        train_text_mapping_path: Optional[str] = None,
+        val_text_mapping_path: Optional[str] = None,
+        tag_prompt_subdir: str = "auto",
+        tag_sentence_style: str = "ordered",
     ) -> None:
         super(MultiDataModule, self).__init__()
         self.train_batch_size = train_batch_size
@@ -50,6 +55,11 @@ class MultiDataModule(LightningDataModule):
         self.val_raw_dir = val_raw_dir
         self.test_raw_dir = test_raw_dir
         self.val_tfrecords_splitted = val_tfrecords_splitted
+        self.text_prompt_root = text_prompt_root
+        self.train_text_mapping_path = train_text_mapping_path
+        self.val_text_mapping_path = val_text_mapping_path
+        self.tag_prompt_subdir = tag_prompt_subdir
+        self.tag_sentence_style = tag_sentence_style
 
         self.train_transform = WaymoTargetBuilderTrain(train_max_num)
         self.val_transform = WaymoTargetBuilderVal()
@@ -57,20 +67,43 @@ class MultiDataModule(LightningDataModule):
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage == "fit" or stage is None:
-            self.train_dataset = MultiDataset(self.train_raw_dir, self.train_transform)
+            self.train_dataset = MultiDataset(
+                self.train_raw_dir,
+                self.train_transform,
+                text_prompt_root=self.text_prompt_root,
+                text_mapping_path=self.train_text_mapping_path,
+                text_split="train",
+                tag_prompt_subdir=self.tag_prompt_subdir,
+                tag_sentence_style=self.tag_sentence_style,
+            )
             self.val_dataset = MultiDataset(
                 self.val_raw_dir,
                 self.val_transform,
                 tfrecord_dir=self.val_tfrecords_splitted,
+                text_prompt_root=self.text_prompt_root,
+                text_mapping_path=self.val_text_mapping_path,
+                text_split="val",
+                tag_prompt_subdir=self.tag_prompt_subdir,
+                tag_sentence_style=self.tag_sentence_style,
             )
         elif stage == "validate":
             self.val_dataset = MultiDataset(
                 self.val_raw_dir,
                 self.val_transform,
                 tfrecord_dir=self.val_tfrecords_splitted,
+                text_prompt_root=self.text_prompt_root,
+                text_mapping_path=self.val_text_mapping_path,
+                text_split="val",
+                tag_prompt_subdir=self.tag_prompt_subdir,
+                tag_sentence_style=self.tag_sentence_style,
             )
         elif stage == "test":
-            self.test_dataset = MultiDataset(self.test_raw_dir, self.test_transform)
+            self.test_dataset = MultiDataset(
+                self.test_raw_dir,
+                self.test_transform,
+                text_prompt_root=None,
+                text_mapping_path=None,
+            )
         else:
             raise ValueError(f"{stage} should be one of [fit, validate, test]")
 

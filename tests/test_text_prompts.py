@@ -23,6 +23,7 @@ sys.modules[SPEC.name] = TEXT_PROMPTS
 SPEC.loader.exec_module(TEXT_PROMPTS)
 ECoSimTagPromptStore = TEXT_PROMPTS.ECoSimTagPromptStore
 scene_bucket = TEXT_PROMPTS.scene_bucket
+flatten_batched_prompts = TEXT_PROMPTS.flatten_batched_prompts
 
 
 class ECoSimTagPromptStoreTest(unittest.TestCase):
@@ -208,6 +209,24 @@ class ECoSimTagPromptStoreTest(unittest.TestCase):
             self.make_store(split="test")
         with self.assertRaisesRegex(ValueError, "sentence_style"):
             self.make_store(sentence_style="timed")
+
+
+class FlattenBatchedPromptsTest(unittest.TestCase):
+    def test_nested_pyg_style_values_preserve_depth_first_agent_order(self):
+        self.assertEqual(
+            flatten_batched_prompts(
+                [["first-0", "first-1"], ("second-0", "second-1")]
+            ),
+            ["first-0", "first-1", "second-0", "second-1"],
+        )
+
+    def test_flat_values_and_single_string_are_supported(self):
+        self.assertEqual(flatten_batched_prompts(["a", "b"]), ["a", "b"])
+        self.assertEqual(flatten_batched_prompts("a"), ["a"])
+
+    def test_non_string_leaf_is_rejected(self):
+        with self.assertRaisesRegex(TypeError, "string"):
+            flatten_batched_prompts([["a"], [3]])
 
 
 if __name__ == "__main__":
