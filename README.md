@@ -124,15 +124,14 @@ overriding a bundled method with an external implementation.
 ### Optional causal history dynamics
 
 The reconstructed vocabulary sources above remain training-only, offline
-artifacts and are never used as model inputs.  A separate optional model branch
-adds three body-frame quantities derived from reconstructed xy/theta: signed
-longitudinal acceleration, angular speed, and signed lateral acceleration.
-During preprocessing, the complete raw frames 0--10 history is passed once
+artifacts and are never used as model inputs. A separate optional model branch
+adds signed longitudinal acceleration, angular speed, and signed lateral
+acceleration. Its default `cached_reconstructed` mode passes raw frames 0--10
 through the same missing-value, trajectory, and reverse-aware heading filter
-used by the reconstructed vocabulary.  The two CatK history tokens receive the
-values at frames 5 and 10 respectively.  No frame after the observable history
-is read.  A token feature is masked when its six-frame interval contains fewer
-than three raw observations.
+used by the reconstructed vocabulary during preprocessing. The two CatK
+history tokens receive the values at frames 5 and 10 respectively. No frame
+after the observable history is read. A token feature is masked when its
+six-frame interval contains fewer than three raw observations.
 
 Generate caches containing these optional fields for every split before using
 a history-dynamics experiment:
@@ -149,9 +148,17 @@ done
 ```
 
 Omitting `--history_dynamics_filter_strength` produces unchanged CatK caches.
-Existing caches can therefore still run the original experiments, but they
-must be regenerated before enabling the dynamics branch because CatK's legacy
+Existing caches can therefore still run the original experiments. They must
+be regenerated before enabling `cached_reconstructed` because CatK's legacy
 interpolation has already discarded the original gap mask.
+
+The `online_raw` ablation retains the same three model inputs but calculates
+them inside `TokenProcessor` from ordinary CatK `position`, `heading`, and
+`valid_mask` tensors. It uses causal backward finite differences at frames 5
+and 10 and adds no smoothing, fitting, gap filling, heading correction, or
+trajectory reconstruction. Ordinary CatK preprocessing, including its legacy
+interpolation, remains unchanged. Cached `history_dynamics` fields are ignored,
+so this mode also works with an ordinary cache that does not contain them.
 
 The original CatK architecture remains the default.  Enable the dynamics
 ablation with the dedicated experiment:
@@ -161,6 +168,25 @@ MY_EXPERIMENT=pre_bc_history_dynamics \
 MY_TASK_NAME=pre_bc_history_dynamics_b200 \
 bash scripts/train.sh
 ```
+
+Run the online raw, hard-label comparison without rebuilding the cache:
+
+```bash
+MY_EXPERIMENT=pre_bc_history_dynamics_online_raw \
+MY_TASK_NAME=pre_bc_history_dynamics_online_raw_hard_ce_b200 \
+CACHE_ROOT=/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario_history_dynamics_exact \
+WANDB_OFFLINE=false \
+WANDB_ENTITY=huyuening911-beijing-jiaotong-university \
+bash scripts/train.sh \
+  ckpt_path=null \
+  model.model_config.training_loss.spatial_aware_smoothing=false \
+  model.model_config.training_loss.label_smoothing=0.0 \
+  model.model_config.val_closed_loop=false
+```
+
+Reusing the exact-cache directory above holds scenario selection and every
+unrelated input constant for the ablation; `online_raw` does not read its
+precomputed reconstructed history dynamics.
 
 Continue with `experiment=clsft_history_dynamics` and evaluate a compatible
 checkpoint with `experiment=inference_history_dynamics`.  A checkpoint trained

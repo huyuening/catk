@@ -1,0 +1,12 @@
+# @package _global_
+
+# Pre-BC with three history dynamics calculated online from ordinary CatK tensors.
+defaults:
+  - pre_bc
+  - _self_
+
+model:
+  model_config:
+    history_dynamics:
+      is_active: true
+      mode: online_raw
