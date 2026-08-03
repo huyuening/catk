@@ -333,7 +333,10 @@ def model_config(*, text_control_active=True, finetune=False, closed=False):
         token_processor=AttrDict(),
         history_dynamics=AttrDict(is_active=True),
         future_token_dynamics=AttrDict(is_active=False),
-        text_control=AttrDict(is_active=text_control_active),
+        text_control=AttrDict(
+            is_active=text_control_active,
+            freeze_base=True,
+        ),
         finetune=finetune,
         wosac_backend="fast",
         wosac_metrics_version="2025",
@@ -418,6 +421,13 @@ class TextControlTrainingTest(unittest.TestCase):
     def test_ordinary_finetune_and_text_freeze_are_mutually_exclusive(self):
         with self.assertRaisesRegex(ValueError, "finetune.*text control|text control.*finetune"):
             SMART(model_config(finetune=True))
+
+    def test_text_control_rejects_unfrozen_base_configuration(self):
+        config = model_config()
+        config.text_control["freeze_base"] = False
+
+        with self.assertRaisesRegex(ValueError, "freeze_base.*true"):
+            SMART(config)
 
     def test_training_mask_intersects_prompt_and_train_masks(self):
         model = SMART(model_config())

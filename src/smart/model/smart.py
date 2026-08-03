@@ -65,6 +65,10 @@ class SMART(LightningModule):
             raise ValueError(
                 "model_config.finetune and text control cannot both be enabled"
             )
+        if self.text_control_active and not bool(
+            text_control.get("freeze_base", True)
+        ):
+            raise ValueError("text control V1 requires freeze_base=true")
         self.token_processor = TokenProcessor(
             **model_config.token_processor,
             history_dynamics=history_dynamics,

@@ -196,6 +196,9 @@ complete training trajectories, follow
 [Training-Trajectory Token-Transition Dynamics](docs/training-trajectory-transition-dynamics.md).
 
 ## Run the code
+For frozen-PRE_BC ECoSim `tag_only` training and single-agent text-controlled
+rollouts, see the [text-control operator and evaluation guide](docs/text_control_pre_bc.md).
+
 In the scripts, we provide
 - [scripts/train.sh](scripts/train.sh) for training and fine-tuning.
 - [scripts/local_val.sh](scripts/local_val.sh) for local validation.

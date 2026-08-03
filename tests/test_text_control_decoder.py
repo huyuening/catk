@@ -28,23 +28,33 @@ def _install_dependency_stubs():
         module.radius_graph = lambda *args, **kwargs: torch.empty(2, 0, dtype=torch.long)
         sys.modules["torch_cluster"] = module
 
-    if "torch_geometric" in sys.modules or importlib.util.find_spec("torch_geometric") is not None:
+    root = sys.modules.get("torch_geometric")
+    if root is not None:
+        spec = getattr(root, "__spec__", None)
+        if spec is not None and spec.loader is not None:
+            return
+    elif importlib.util.find_spec("torch_geometric") is not None:
         return
+    else:
+        root = types.ModuleType("torch_geometric")
+        root.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric", loader=None, is_package=True
+        )
+        root.__path__ = []
 
-    root = types.ModuleType("torch_geometric")
-    root.__spec__ = importlib.machinery.ModuleSpec(
-        "torch_geometric", loader=None, is_package=True
-    )
-    root.__path__ = []
-    nn_module = types.ModuleType("torch_geometric.nn")
-    nn_module.__spec__ = importlib.machinery.ModuleSpec(
-        "torch_geometric.nn", loader=None, is_package=True
-    )
-    nn_module.__path__ = []
-    conv = types.ModuleType("torch_geometric.nn.conv")
-    conv.__spec__ = importlib.machinery.ModuleSpec(
-        "torch_geometric.nn.conv", loader=None
-    )
+    nn_module = sys.modules.get("torch_geometric.nn")
+    if nn_module is None:
+        nn_module = types.ModuleType("torch_geometric.nn")
+        nn_module.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric.nn", loader=None, is_package=True
+        )
+        nn_module.__path__ = []
+    conv = sys.modules.get("torch_geometric.nn.conv")
+    if conv is None:
+        conv = types.ModuleType("torch_geometric.nn.conv")
+        conv.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric.nn.conv", loader=None
+        )
 
     class MessagePassing(nn.Module):
         def __init__(self, *args, **kwargs):
@@ -54,15 +64,19 @@ def _install_dependency_stubs():
             raise AssertionError("test attention layers must replace MessagePassing")
 
     conv.MessagePassing = MessagePassing
-    data = types.ModuleType("torch_geometric.data")
-    data.__spec__ = importlib.machinery.ModuleSpec(
-        "torch_geometric.data", loader=None
-    )
+    data = sys.modules.get("torch_geometric.data")
+    if data is None:
+        data = types.ModuleType("torch_geometric.data")
+        data.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric.data", loader=None
+        )
     data.HeteroData = dict
-    utils = types.ModuleType("torch_geometric.utils")
-    utils.__spec__ = importlib.machinery.ModuleSpec(
-        "torch_geometric.utils", loader=None
-    )
+    utils = sys.modules.get("torch_geometric.utils")
+    if utils is None:
+        utils = types.ModuleType("torch_geometric.utils")
+        utils.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric.utils", loader=None
+        )
     utils.softmax = lambda value, *args, **kwargs: value
     utils.dense_to_sparse = lambda value, *args, **kwargs: (
         value.nonzero().T,

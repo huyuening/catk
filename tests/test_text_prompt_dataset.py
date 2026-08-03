@@ -30,16 +30,21 @@ class _LoggerStub:
 
 
 def _load_dataset_modules():
-    torch_geometric = types.ModuleType("torch_geometric")
-    torch_geometric.__path__ = []
-    torch_geometric.__spec__ = importlib.machinery.ModuleSpec(
-        "torch_geometric", loader=None, is_package=True
-    )
-    geometric_data = types.ModuleType("torch_geometric.data")
-    geometric_data.Dataset = _DatasetStub
+    torch_geometric = sys.modules.get("torch_geometric")
+    if torch_geometric is None:
+        torch_geometric = types.ModuleType("torch_geometric")
+        torch_geometric.__path__ = []
+        torch_geometric.__spec__ = importlib.machinery.ModuleSpec(
+            "torch_geometric", loader=None, is_package=True
+        )
+    geometric_data = sys.modules.get("torch_geometric.data")
+    if geometric_data is None:
+        geometric_data = types.ModuleType("torch_geometric.data")
+    if not hasattr(geometric_data, "Dataset"):
+        geometric_data.Dataset = _DatasetStub
     torch_geometric.data = geometric_data
-    sys.modules.setdefault("torch_geometric", torch_geometric)
-    sys.modules.setdefault("torch_geometric.data", geometric_data)
+    sys.modules["torch_geometric"] = torch_geometric
+    sys.modules["torch_geometric.data"] = geometric_data
 
     utils = types.ModuleType("src.utils")
     utils.RankedLogger = lambda *args, **kwargs: _LoggerStub()
@@ -91,6 +96,7 @@ def _load_datamodule_module():
 
     loader_module = types.ModuleType("torch_geometric.loader")
     loader_module.DataLoader = type("DataLoader", (), {})
+    previous_loader_module = sys.modules.get("torch_geometric.loader")
     sys.modules["torch_geometric.loader"] = loader_module
 
     package = types.ModuleType("src.smart.datamodules")
@@ -111,7 +117,13 @@ def _load_datamodule_module():
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous_loader_module is None:
+            sys.modules.pop("torch_geometric.loader", None)
+        else:
+            sys.modules["torch_geometric.loader"] = previous_loader_module
     return module
 
 

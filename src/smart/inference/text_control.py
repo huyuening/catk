@@ -175,6 +175,8 @@ class _TextControlRuntime(nn.Module):
         text_control = _config_get(model_config, "text_control")
         if text_control is None or not bool(_config_get(text_control, "is_active", False)):
             raise ValueError("checkpoint model_config does not enable text control")
+        if not bool(_config_get(text_control, "freeze_base", True)):
+            raise ValueError("text control V1 requires freeze_base=true")
         token_processor_config = _config_get(model_config, "token_processor")
         decoder_config = _config_get(model_config, "decoder")
         if token_processor_config is None or decoder_config is None:
@@ -259,6 +261,8 @@ def _prepare_single_graph(data: Any, device: torch.device) -> Any:
     except ImportError:
         return _move_nested(data, device)
     graph = data if isinstance(data, HeteroData) else HeteroData(data)
+    if isinstance(graph, dict) or not hasattr(graph, "to"):
+        return _move_nested(graph, device)
     graph.num_graphs = 1
     return graph.to(device)
 
