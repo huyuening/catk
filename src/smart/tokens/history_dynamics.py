@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
+import torch
+from torch import Tensor
 
 from .trajectory_filter_reconstructor import (
     TrajectoryFilterConfig,
@@ -37,6 +39,119 @@ class HistoryDynamicsResult:
     reconstructed_position: np.ndarray
     reconstructed_heading: np.ndarray
     reconstructed_valid: np.ndarray
+
+
+@torch.no_grad()
+def estimate_raw_history_dynamics(
+    position: Tensor,
+    heading: Tensor,
+    valid_mask: Tensor,
+    *,
+    num_historical_steps: int = 11,
+    token_shift_steps: int = 5,
+    dt: float = 0.1,
+    max_abs_longitudinal_accel_mps2: float = 15.0,
+    max_abs_angular_speed_radps: float = 3.0,
+    max_abs_lateral_accel_mps2: float = 15.0,
+) -> tuple[Tensor, Tensor]:
+    """Calculate causal endpoint dynamics without reconstructing trajectories.
+
+    The input tensors are used as stored by ordinary CatK preprocessing. At
+    each history-token endpoint, backward finite differences over the last
+    three cached positions produce world-frame acceleration. The acceleration
+    is projected through the cached endpoint heading, while wrapped heading
+    difference produces angular speed. No smoothing, fitting, gap filling, or
+    heading correction is applied here.
+    """
+
+    if position.ndim != 3 or position.size(-1) < 2:
+        raise ValueError("position must have shape [n_agent, n_step, >=2]")
+    if (
+        heading.shape != position.shape[:2]
+        or valid_mask.shape != position.shape[:2]
+    ):
+        raise ValueError("heading and valid_mask must match position[:2]")
+    if num_historical_steps > position.size(1) or num_historical_steps < 3:
+        raise ValueError(
+            "num_historical_steps must fit the available trajectory"
+        )
+    if (
+        token_shift_steps < 2
+        or (num_historical_steps - 1) % token_shift_steps
+    ):
+        raise ValueError(
+            "token_shift_steps must produce endpoints with 3-frame support"
+        )
+    if not np.isfinite(dt) or dt <= 0:
+        raise ValueError("dt must be finite and positive")
+
+    limits_tuple = (
+        max_abs_longitudinal_accel_mps2,
+        max_abs_angular_speed_radps,
+        max_abs_lateral_accel_mps2,
+    )
+    if any(
+        not np.isfinite(value) or value <= 0 for value in limits_tuple
+    ):
+        raise ValueError(
+            "dynamics clipping limits must be finite and positive"
+        )
+
+    output_dtype = position.dtype
+    compute_dtype = (
+        torch.float32
+        if output_dtype in (torch.float16, torch.bfloat16)
+        else output_dtype
+    )
+    endpoints = torch.arange(
+        token_shift_steps,
+        num_historical_steps,
+        token_shift_steps,
+        device=position.device,
+    )
+    xy = position[..., :2].to(dtype=compute_dtype)
+    theta = heading.to(device=position.device, dtype=compute_dtype)
+    valid = valid_mask.to(device=position.device, dtype=torch.bool)
+
+    p0 = xy[:, endpoints - 2]
+    p1 = xy[:, endpoints - 1]
+    p2 = xy[:, endpoints]
+    theta_previous = theta[:, endpoints - 1]
+    theta_current = theta[:, endpoints]
+    feature_valid = (
+        valid[:, endpoints - 2]
+        & valid[:, endpoints - 1]
+        & valid[:, endpoints]
+        & torch.isfinite(p0).all(dim=-1)
+        & torch.isfinite(p1).all(dim=-1)
+        & torch.isfinite(p2).all(dim=-1)
+        & torch.isfinite(theta_previous)
+        & torch.isfinite(theta_current)
+    )
+
+    velocity_previous = (p1 - p0) / dt
+    velocity_current = (p2 - p1) / dt
+    acceleration = (velocity_current - velocity_previous) / dt
+    delta_heading = torch.atan2(
+        torch.sin(theta_current - theta_previous),
+        torch.cos(theta_current - theta_previous),
+    )
+    angular_speed = delta_heading / dt
+    cosine = torch.cos(theta_current)
+    sine = torch.sin(theta_current)
+    longitudinal = (
+        acceleration[..., 0] * cosine + acceleration[..., 1] * sine
+    )
+    lateral = (
+        -acceleration[..., 0] * sine + acceleration[..., 1] * cosine
+    )
+    values = torch.stack((longitudinal, angular_speed, lateral), dim=-1)
+    limits = values.new_tensor(limits_tuple)
+    values = torch.maximum(torch.minimum(values, limits), -limits)
+    values = torch.where(
+        feature_valid.unsqueeze(-1), values, torch.zeros_like(values)
+    )
+    return values.to(output_dtype), feature_valid
 
 
 def extract_history_dynamics(

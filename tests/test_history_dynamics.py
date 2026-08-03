@@ -1,8 +1,12 @@
 import unittest
 
 import numpy as np
+import torch
 
-from src.smart.tokens.history_dynamics import extract_history_dynamics
+from src.smart.tokens.history_dynamics import (
+    estimate_raw_history_dynamics,
+    extract_history_dynamics,
+)
 
 
 class HistoryDynamicsTest(unittest.TestCase):
@@ -150,6 +154,133 @@ class HistoryDynamicsTest(unittest.TestCase):
                 np.zeros(11),
                 np.ones(11, dtype=bool),
                 agent_type=0,
+            )
+
+
+class RawHistoryDynamicsTest(unittest.TestCase):
+    @staticmethod
+    def _history(x, y=None, heading=None):
+        x = torch.as_tensor(x, dtype=torch.float32)
+        y = (
+            torch.zeros_like(x)
+            if y is None
+            else torch.as_tensor(y, dtype=torch.float32)
+        )
+        position = torch.zeros(1, len(x), 3, dtype=torch.float32)
+        position[0, :, :2] = torch.stack((x, y), dim=-1)
+        if heading is None:
+            heading = torch.zeros(1, len(x), dtype=torch.float32)
+        else:
+            heading = torch.as_tensor(
+                heading, dtype=torch.float32
+            ).view(1, -1)
+        valid = torch.ones(1, len(x), dtype=torch.bool)
+        return position, heading, valid
+
+    def test_quadratic_motion_returns_endpoint_body_acceleration(self):
+        time = torch.arange(11, dtype=torch.float32) * 0.1
+        acceleration = 2.0
+        x = 3.0 * time + 0.5 * acceleration * time.square()
+        position, heading, valid = self._history(x)
+
+        values, feature_valid = estimate_raw_history_dynamics(
+            position, heading, valid
+        )
+
+        self.assertEqual(tuple(values.shape), (1, 2, 3))
+        torch.testing.assert_close(
+            feature_valid, torch.ones(1, 2, dtype=torch.bool)
+        )
+        torch.testing.assert_close(
+            values[0, :, 0],
+            torch.full((2,), acceleration),
+            atol=2e-4,
+            rtol=0,
+        )
+        torch.testing.assert_close(
+            values[0, :, 1:], torch.zeros(2, 2)
+        )
+
+    def test_constant_velocity_has_zero_dynamics(self):
+        time = torch.arange(11, dtype=torch.float32) * 0.1
+        position, heading, valid = self._history(4.0 * time)
+
+        values, feature_valid = estimate_raw_history_dynamics(
+            position, heading, valid
+        )
+
+        torch.testing.assert_close(
+            values, torch.zeros(1, 2, 3), atol=2e-4, rtol=0
+        )
+        self.assertTrue(feature_valid.all())
+
+    def test_heading_difference_wraps_across_pi(self):
+        time = torch.arange(11, dtype=torch.float32) * 0.1
+        heading = torch.zeros(11)
+        heading[4], heading[5] = torch.pi - 0.01, -torch.pi + 0.01
+        heading[9], heading[10] = torch.pi - 0.01, -torch.pi + 0.01
+        position, heading, valid = self._history(time, heading=heading)
+
+        values, feature_valid = estimate_raw_history_dynamics(
+            position, heading, valid
+        )
+
+        torch.testing.assert_close(
+            values[0, :, 1],
+            torch.full((2,), 0.2),
+            atol=2e-4,
+            rtol=0,
+        )
+        self.assertTrue(feature_valid.all())
+
+    def test_invalid_or_nonfinite_support_is_zero_and_masked(self):
+        time = torch.arange(11, dtype=torch.float32) * 0.1
+        position, heading, valid = self._history(time.square())
+        valid[0, 3] = False
+        position[0, 9, 0] = float("nan")
+
+        values, feature_valid = estimate_raw_history_dynamics(
+            position, heading, valid
+        )
+
+        torch.testing.assert_close(
+            feature_valid, torch.zeros(1, 2, dtype=torch.bool)
+        )
+        torch.testing.assert_close(values, torch.zeros(1, 2, 3))
+
+    def test_feature_ranges_are_clipped(self):
+        time = torch.arange(11, dtype=torch.float32) * 0.1
+        x = 50.0 * time.square()
+        heading = torch.arange(11, dtype=torch.float32)
+        position, heading, valid = self._history(x, heading=heading)
+
+        values, feature_valid = estimate_raw_history_dynamics(
+            position, heading, valid
+        )
+
+        self.assertTrue(feature_valid.all())
+        self.assertTrue(
+            torch.all(
+                values.abs() <= torch.tensor([15.0, 3.0, 15.0])
+            )
+        )
+        torch.testing.assert_close(
+            values[0, :, 1], torch.full((2,), 3.0)
+        )
+
+    def test_malformed_inputs_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "position"):
+            estimate_raw_history_dynamics(
+                torch.zeros(11),
+                torch.zeros(1, 11),
+                torch.ones(1, 11, dtype=torch.bool),
+            )
+        with self.assertRaisesRegex(ValueError, "dt"):
+            estimate_raw_history_dynamics(
+                torch.zeros(1, 11, 3),
+                torch.zeros(1, 11),
+                torch.ones(1, 11, dtype=torch.bool),
+                dt=0.0,
             )
 
 
