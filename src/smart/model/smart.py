@@ -27,9 +27,13 @@ from src.smart.metrics import (
     WOSACSubmission,
     minADE,
 )
+from src.smart.datasets.text_prompts import flatten_batched_prompts
 from src.smart.modules.smart_decoder import SMARTDecoder
 from src.smart.tokens.token_processor import TokenProcessor
-from src.smart.utils.finetune import set_model_for_finetuning
+from src.smart.utils.finetune import (
+    set_model_for_finetuning,
+    set_model_for_text_control,
+)
 from src.utils.vis_waymo import VisWaymo
 from src.utils.wosac_utils import get_scenario_id_int_tensor, get_scenario_rollouts
 
@@ -52,6 +56,15 @@ class SMART(LightningModule):
             "future_token_dynamics",
             None,
         )
+        text_control = model_config.get("text_control", None)
+        self.text_control_active = bool(
+            text_control is not None
+            and text_control.get("is_active", False)
+        )
+        if self.text_control_active and bool(model_config.finetune):
+            raise ValueError(
+                "model_config.finetune and text control cannot both be enabled"
+            )
         self.token_processor = TokenProcessor(
             **model_config.token_processor,
             history_dynamics=history_dynamics,
@@ -63,8 +76,15 @@ class SMART(LightningModule):
             n_token_agent=self.token_processor.n_token_agent,
             history_dynamics=history_dynamics,
             future_token_dynamics=future_token_dynamics,
+            text_control=text_control,
         )
-        set_model_for_finetuning(self.encoder, model_config.finetune)
+        if self.text_control_active:
+            self.text_control_trainable_names = set_model_for_text_control(
+                self.encoder
+            )
+        else:
+            self.text_control_trainable_names = []
+            set_model_for_finetuning(self.encoder, model_config.finetune)
 
         self.minADE = minADE()
         self.TokenCls = TokenCls(max_guesses=5)
@@ -106,15 +126,110 @@ class SMART(LightningModule):
         self.training_rollout_sampling = model_config.training_rollout_sampling
         self.validation_rollout_sampling = model_config.validation_rollout_sampling
 
+    @staticmethod
+    def _scenario_context(data) -> str:
+        try:
+            scenario_ids = data["scenario_id"]
+        except (KeyError, TypeError):
+            return "<unknown scenario>"
+        return str(scenario_ids)
+
+    def _prepare_text_control(self, data):
+        if not self.text_control_active:
+            return None
+
+        agent_data = data["agent"]
+        scenario_context = self._scenario_context(data)
+        try:
+            prompts = flatten_batched_prompts(agent_data["text_prompt"])
+            prompt_mask = agent_data["text_prompt_mask"]
+            agent_ids = agent_data["id"]
+        except KeyError as exc:
+            raise KeyError(
+                f"missing text-control field {exc.args[0]!r} for "
+                f"{scenario_context}"
+            ) from exc
+
+        if not isinstance(prompt_mask, torch.Tensor):
+            raise TypeError(
+                f"text_prompt_mask must be a tensor for {scenario_context}"
+            )
+        if prompt_mask.dtype != torch.bool:
+            raise ValueError(
+                f"text_prompt_mask must be Boolean for {scenario_context}"
+            )
+        mask = prompt_mask.reshape(-1).clone()
+        n_agent = int(agent_ids.shape[0])
+        if len(prompts) != n_agent or mask.numel() != n_agent:
+            raise ValueError(
+                "text prompt alignment mismatch for "
+                f"{scenario_context}: prompts={len(prompts)}, "
+                f"mask={mask.numel()}, agents={n_agent}"
+            )
+
+        if "train_mask" in agent_data:
+            train_mask = agent_data["train_mask"]
+            if not isinstance(train_mask, torch.Tensor):
+                raise TypeError(
+                    f"train_mask must be a tensor for {scenario_context}"
+                )
+            if train_mask.dtype != torch.bool:
+                raise ValueError(
+                    f"train_mask must be Boolean for {scenario_context}"
+                )
+            train_mask = train_mask.reshape(-1).to(mask.device)
+            if train_mask.numel() != n_agent:
+                raise ValueError(
+                    "train_mask alignment mismatch for "
+                    f"{scenario_context}: mask={train_mask.numel()}, "
+                    f"agents={n_agent}"
+                )
+            mask &= train_mask
+
+        if self.training:
+            fraction = (
+                mask.float().mean()
+                if mask.numel()
+                else torch.zeros((), device=mask.device)
+            )
+            self.log(
+                "train/text_control_fraction",
+                fraction,
+                on_step=True,
+                batch_size=1,
+            )
+
+        return self.encoder.encode_text_control(
+            prompts,
+            mask,
+            mask.device,
+            training=self.training,
+        )
+
+    def _add_text_control_ddp_anchor(self, loss: torch.Tensor) -> torch.Tensor:
+        if not self.text_control_active:
+            return loss
+        anchor = loss.new_zeros(())
+        for parameter in self.parameters():
+            if parameter.requires_grad:
+                anchor = anchor + parameter.reshape(-1)[0] * 0.0
+        return loss + anchor
+
     def training_step(self, data, batch_idx):
         tokenized_map, tokenized_agent = self.token_processor(data)
+        encoded_text_control = self._prepare_text_control(data)
         if self.training_rollout_sampling.num_k <= 0:
-            pred = self.encoder(tokenized_map, tokenized_agent)
+            pred = self.encoder(
+                tokenized_map,
+                tokenized_agent,
+                encoded_text_control=encoded_text_control,
+            )
         else:
             pred = self.encoder.inference(
                 tokenized_map,
                 tokenized_agent,
                 sampling_scheme=self.training_rollout_sampling,
+                encoded_text_control=encoded_text_control,
             )
 
         loss = self.training_loss(
@@ -125,16 +240,22 @@ class SMART(LightningModule):
             train_mask=data["agent"]["train_mask"],  # [n_agent]
             current_epoch=self.current_epoch,
         )
+        loss = self._add_text_control_ddp_anchor(loss)
         self.log("train/loss", loss, on_step=True, batch_size=1)
 
         return loss
 
     def validation_step(self, data, batch_idx):
         tokenized_map, tokenized_agent = self.token_processor(data)
+        encoded_text_control = self._prepare_text_control(data)
 
         # ! open-loop vlidation
         if self.val_open_loop:
-            pred = self.encoder(tokenized_map, tokenized_agent)
+            pred = self.encoder(
+                tokenized_map,
+                tokenized_agent,
+                encoded_text_control=encoded_text_control,
+            )
             loss = self.training_loss(
                 **pred,
                 token_agent_shape=tokenized_agent["token_agent_shape"],  # [n_agent, 2]
@@ -163,7 +284,10 @@ class SMART(LightningModule):
             pred_traj, pred_z, pred_head = [], [], []
             for _ in range(self.n_rollout_closed_val):
                 pred = self.encoder.inference(
-                    tokenized_map, tokenized_agent, self.validation_rollout_sampling
+                    tokenized_map,
+                    tokenized_agent,
+                    self.validation_rollout_sampling,
+                    encoded_text_control=encoded_text_control,
                 )
                 pred_traj.append(pred["pred_traj_10hz"])
                 pred_z.append(pred["pred_z_10hz"])
@@ -311,7 +435,14 @@ class SMART(LightningModule):
                     self.wosac_submission.save_sub_file()
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        trainable_parameters = [
+            parameter
+            for parameter in self.parameters()
+            if parameter.requires_grad
+        ]
+        if not trainable_parameters:
+            raise RuntimeError("No trainable parameters")
+        optimizer = torch.optim.AdamW(trainable_parameters, lr=self.lr)
 
         def lr_lambda(current_step):
             current_step = self.current_epoch + 1
@@ -337,12 +468,16 @@ class SMART(LightningModule):
 
     def test_step(self, data, batch_idx):
         tokenized_map, tokenized_agent = self.token_processor(data)
+        encoded_text_control = self._prepare_text_control(data)
 
         # ! only closed-loop vlidation
         pred_traj, pred_z, pred_head = [], [], []
         for _ in range(self.n_rollout_closed_val):
             pred = self.encoder.inference(
-                tokenized_map, tokenized_agent, self.validation_rollout_sampling
+                tokenized_map,
+                tokenized_agent,
+                self.validation_rollout_sampling,
+                encoded_text_control=encoded_text_control,
             )
             pred_traj.append(pred["pred_traj_10hz"])
             pred_z.append(pred["pred_z_10hz"])

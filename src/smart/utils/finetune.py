@@ -18,6 +18,28 @@ from src.utils import RankedLogger
 log = RankedLogger(__name__, rank_zero_only=True)
 
 
+def set_model_for_text_control(model: torch.nn.Module) -> list[str]:
+    """Freeze CatK and expose only the ECoSim text-control parameters."""
+
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+
+    adapter = model.agent_encoder.text_control_adapter
+    if adapter is None:
+        raise ValueError("text control is active but no adapter was constructed")
+    adapter.unfreeze_control_parameters()
+
+    names = [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    if not names:
+        raise RuntimeError("text-control training has no trainable parameters")
+    log.info("Training only %d text-control parameter tensors", len(names))
+    return names
+
+
 def set_model_for_finetuning(model: torch.nn.Module, finetune: bool) -> None:
     def _unfreeze(module: torch.nn.Module) -> None:
         for p in module.parameters():
