@@ -36,6 +36,26 @@ model_config:
     # [signed longitudinal acceleration, angular speed, lateral acceleration]
     normalization_scale: [5.0, 1.0, 5.0]
     initial_gate: 1.0
+  # Optional ECoSim-style static per-agent language control. When active, the
+  # complete CatK base is frozen and only text LoRA, projection, and FiLM train.
+  text_control:
+    is_active: false
+    freeze_base: true
+    model_name_or_path: distilbert-base-uncased
+    local_files_only: false
+    max_length: 384
+    mean_pool: false
+    output_dim: 256
+    lora_rank: 16
+    lora_alpha: 0.4
+    lora_dropout: 0.05
+    lora_last_n_layers: 6
+    film_blocks: [0, 1, 2, 3, 4, 5]
+    film_hidden_dim: 256
+    film_dropout: 0.0
+    film_init_mode: identity
+    film_identity_noise_std: 0.001
+    control_dropout: 0.3
   token_processor:
     map_token_file: "map_traj_token5.pkl"
     agent_token_file: "agent_vocab_555_s2.pkl"

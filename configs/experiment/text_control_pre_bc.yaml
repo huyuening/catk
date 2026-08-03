@@ -1,0 +1,60 @@
+# @package _global_
+
+# ECoSim tag-only conditioning on the strongest frozen CatK PRE-BC base:
+# history dynamics + original TrajTok code loss. This is a weights-only warm
+# start, not ordinary CatK CLSFT and not a Lightning checkpoint resume.
+defaults:
+  - pre_bc_history_dynamics
+  - _self_
+
+action: finetune
+ckpt_path: ${oc.env:PRE_BC_CKPT,null}
+
+model:
+  model_config:
+    lr: 5.0e-5
+    history_dynamics:
+      is_active: true
+    training_loss:
+      spatial_aware_smoothing: true
+      spatial_aware_smoothing_mode: trajtok_original
+    text_control:
+      is_active: true
+      freeze_base: true
+      model_name_or_path: ${oc.env:TEXT_MODEL_PATH,distilbert-base-uncased}
+    # Keep ordinary CatK CLSFT disabled; text-control freezing is independent.
+    finetune: false
+    training_rollout_sampling:
+      criterium: topk_prob_sampled_with_dist
+      num_k: 32
+      temp: 1.0e-5
+    n_rollout_closed_val: 32
+    n_batch_wosac_metric: -1
+    val_open_loop: true
+    val_closed_loop: true
+    wosac_backend: fast
+    wosac_metrics_version: "2025"
+    fast_wosac_gt_dir: ${paths.validation_gt_dir}
+    fast_wosac_require_preprocessed_gt: true
+
+trainer:
+  limit_train_batches: 1.0
+  limit_val_batches: 0.1
+  check_val_every_n_epoch: 1
+  max_epochs: 10
+
+data:
+  train_batch_size: 4
+  val_batch_size: 4
+  test_batch_size: 4
+  text_prompt_root: ${oc.env:TEXT_PROMPT_ROOT}
+  train_text_mapping_path: ${oc.env:TEXT_PROMPT_ROOT}/train_scenario_mapping.json
+  val_text_mapping_path: ${oc.env:TEXT_PROMPT_ROOT}/val_scenario_mapping.json
+  tag_prompt_subdir: auto
+  tag_sentence_style: ordered
+
+# Always create a new run rather than attaching to the PRE-BC run identity.
+logger:
+  wandb:
+    id: null
+    resume: never
