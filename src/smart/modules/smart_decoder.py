@@ -11,14 +11,16 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
+import torch
 import torch.nn as nn
 from omegaconf import DictConfig
 from torch import Tensor
 
 from .agent_decoder import SMARTAgentDecoder
 from .map_decoder import SMARTMapDecoder
+from .text_control import EncodedTextControl
 
 
 class SMARTDecoder(nn.Module):
@@ -43,6 +45,7 @@ class SMARTDecoder(nn.Module):
         endpoint_interpolation: Optional[DictConfig] = None,
         history_dynamics: Optional[DictConfig] = None,
         future_token_dynamics: Optional[DictConfig] = None,
+        text_control: Optional[DictConfig] = None,
     ) -> None:
         super(SMARTDecoder, self).__init__()
         self.map_encoder = SMARTMapDecoder(
@@ -71,13 +74,39 @@ class SMARTDecoder(nn.Module):
             endpoint_interpolation=endpoint_interpolation,
             history_dynamics=history_dynamics,
             future_token_dynamics=future_token_dynamics,
+            text_control=text_control,
+        )
+
+    def encode_text_control(
+        self,
+        prompts: Sequence[str],
+        mask: Tensor,
+        device: torch.device,
+        *,
+        training: bool,
+    ) -> Optional[EncodedTextControl]:
+        adapter = self.agent_encoder.text_control_adapter
+        if adapter is None:
+            return None
+        return adapter.encode(
+            prompts,
+            mask,
+            device,
+            apply_control_dropout=training,
         )
 
     def forward(
-        self, tokenized_map: Dict[str, Tensor], tokenized_agent: Dict[str, Tensor]
+        self,
+        tokenized_map: Dict[str, Tensor],
+        tokenized_agent: Dict[str, Tensor],
+        encoded_text_control: Optional[EncodedTextControl] = None,
     ) -> Dict[str, Tensor]:
         map_feature = self.map_encoder(tokenized_map)
-        pred_dict = self.agent_encoder(tokenized_agent, map_feature)
+        pred_dict = self.agent_encoder(
+            tokenized_agent,
+            map_feature,
+            encoded_text_control=encoded_text_control,
+        )
         return pred_dict
 
     def inference(
@@ -85,9 +114,13 @@ class SMARTDecoder(nn.Module):
         tokenized_map: Dict[str, Tensor],
         tokenized_agent: Dict[str, Tensor],
         sampling_scheme: DictConfig,
+        encoded_text_control: Optional[EncodedTextControl] = None,
     ) -> Dict[str, Tensor]:
         map_feature = self.map_encoder(tokenized_map)
         pred_dict = self.agent_encoder.inference(
-            tokenized_agent, map_feature, sampling_scheme
+            tokenized_agent,
+            map_feature,
+            sampling_scheme,
+            encoded_text_control=encoded_text_control,
         )
         return pred_dict

@@ -26,6 +26,7 @@ from src.smart.modules.endpoint_interpolation import EndpointInterpolator
 from src.smart.modules.future_token_dynamics import (
     FutureTokenDynamicsConditioner,
 )
+from src.smart.modules.text_control import EncodedTextControl, TextControlAdapter
 from src.smart.utils import (
     angle_between_2d_vectors,
     sample_next_token_traj,
@@ -55,6 +56,7 @@ class SMARTAgentDecoder(nn.Module):
         endpoint_interpolation: Optional[DictConfig] = None,
         history_dynamics: Optional[DictConfig] = None,
         future_token_dynamics: Optional[DictConfig] = None,
+        text_control: Optional[DictConfig] = None,
     ) -> None:
         super(SMARTAgentDecoder, self).__init__()
         self.hidden_dim = hidden_dim
@@ -189,6 +191,30 @@ class SMARTAgentDecoder(nn.Module):
             input_dim=hidden_dim, hidden_dim=hidden_dim, output_dim=n_token_agent
         )
         self.apply(weight_init)
+
+        # This must remain after CatK's recursive initializer. Otherwise the
+        # pretrained text backbone would be overwritten by ``weight_init``.
+        self.text_control_adapter = None
+        if text_control is not None and bool(text_control.get("is_active", False)):
+            self.text_control_adapter = TextControlAdapter(
+                hidden_dim=hidden_dim,
+                num_blocks=num_layers,
+                config=text_control,
+            )
+
+    def _condition_on_text(
+        self,
+        features: torch.Tensor,
+        encoded_text_control: Optional[EncodedTextControl],
+        block_index: int,
+    ) -> torch.Tensor:
+        if self.text_control_adapter is None:
+            return features
+        return self.text_control_adapter.condition(
+            features,
+            encoded_text_control,
+            block_index=block_index,
+        )
 
     def agent_token_embedding(
         self,
@@ -452,6 +478,7 @@ class SMARTAgentDecoder(nn.Module):
         self,
         tokenized_agent: Dict[str, torch.Tensor],
         map_feature: Dict[str, torch.Tensor],
+        encoded_text_control: Optional[EncodedTextControl] = None,
     ) -> Dict[str, torch.Tensor]:
         mask = tokenized_agent["valid_mask"]
         pos_a = tokenized_agent["sampled_pos"]
@@ -540,6 +567,11 @@ class SMARTAgentDecoder(nn.Module):
             )
             feat_a = self.a2a_attn_layers[i](feat_a, r_a2a, edge_index_a2a)
             feat_a = feat_a.view(n_step, n_agent, -1).transpose(0, 1)
+            feat_a = self._condition_on_text(
+                feat_a,
+                encoded_text_control,
+                block_index=i,
+            )
 
         # ! final mlp to get outputs
         next_token_logits = self.token_predict_head(feat_a)
@@ -567,6 +599,7 @@ class SMARTAgentDecoder(nn.Module):
         tokenized_agent: Dict[str, torch.Tensor],
         map_feature: Dict[str, torch.Tensor],
         sampling_scheme: DictConfig,
+        encoded_text_control: Optional[EncodedTextControl] = None,
     ) -> Dict[str, torch.Tensor]:
         n_agent = tokenized_agent["valid_mask"].shape[0]
         n_step_future_10hz = self.num_future_steps  # 80
@@ -720,6 +753,11 @@ class SMARTAgentDecoder(nn.Module):
                     _feat_temporal = _feat_temporal.view(n_step, n_agent, -1).transpose(
                         0, 1
                     )
+                    _feat_temporal = self._condition_on_text(
+                        _feat_temporal,
+                        encoded_text_control,
+                        block_index=i,
+                    )
                     feat_a_now = _feat_temporal[:, -1]  # [n_agent, hidden_dim]
 
                     if i + 1 < self.num_layers:
@@ -741,6 +779,11 @@ class SMARTAgentDecoder(nn.Module):
                     )
                     feat_a_now = self.a2a_attn_layers[i](
                         feat_a_now, r_a2a, edge_index_a2a
+                    )
+                    feat_a_now = self._condition_on_text(
+                        feat_a_now,
+                        encoded_text_control,
+                        block_index=i,
                     )
 
                     # [n_agent, n_step, hidden_dim]
