@@ -215,6 +215,11 @@ class SMART(LightningModule):
                 anchor = anchor + parameter.reshape(-1)[0] * 0.0
         return loss + anchor
 
+    def warm_start_allowed_missing_prefixes(self) -> tuple[str, ...]:
+        if self.text_control_active:
+            return ("encoder.agent_encoder.text_control_adapter.",)
+        return ()
+
     def training_step(self, data, batch_idx):
         tokenized_map, tokenized_agent = self.token_processor(data)
         encoded_text_control = self._prepare_text_control(data)

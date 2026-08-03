@@ -26,6 +26,7 @@ from src.utils import (
     RankedLogger,
     instantiate_callbacks,
     instantiate_loggers,
+    load_warm_start_state_dict,
     log_hyperparameters,
     print_config_tree,
 )
@@ -78,22 +79,18 @@ def run(cfg: DictConfig) -> None:
         }
     )
 
-    log.info(f"Resuming from ckpt: cfg.ckpt_path={cfg.ckpt_path}")
+    log.info(f"Configured checkpoint: cfg.ckpt_path={cfg.ckpt_path}")
     if cfg.action == "fit":
         log.info("Starting training!")
         trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
     elif cfg.action == "finetune":
         log.info("Starting finetuning!")
-        # Lightning checkpoints contain OmegaConf metadata in addition to the
-        # state dict. PyTorch 2.6 defaults to weights_only=True, so a trusted
-        # checkpoint produced by this project must be loaded explicitly as a
-        # complete checkpoint.
-        checkpoint = torch.load(
+        report = load_warm_start_state_dict(
+            model,
             cfg.ckpt_path,
-            map_location="cpu",
-            weights_only=False,
+            allowed_missing_prefixes=model.warm_start_allowed_missing_prefixes(),
         )
-        model.load_state_dict(checkpoint["state_dict"], strict=False)
+        log.info("Weights-only warm-start audit: %s", report)
         trainer.fit(model=model, datamodule=datamodule)
     elif cfg.action == "validate":
         log.info("Starting validating!")
