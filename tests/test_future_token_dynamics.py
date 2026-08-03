@@ -586,6 +586,99 @@ class FutureTokenDynamicsTokenProcessorTest(unittest.TestCase):
                 processor.init_agent_token(str(path))
 
 
+class OnlineRawHistoryDynamicsTokenProcessorTest(unittest.TestCase):
+    @staticmethod
+    def _processor(mode):
+        processor = TokenProcessor.__new__(TokenProcessor)
+        torch.nn.Module.__init__(processor)
+        processor.history_dynamics_active = True
+        processor.history_dynamics_mode = mode
+        processor.shift = 5
+        return processor
+
+    @staticmethod
+    def _inputs():
+        time = torch.arange(11, dtype=torch.float32) * 0.1
+        position = torch.zeros(1, 11, 3)
+        position[0, :, 0] = time.square()
+        heading = torch.zeros(1, 11)
+        valid = torch.ones(1, 11, dtype=torch.bool)
+        return position, heading, valid
+
+    def test_online_mode_works_without_cached_fields(self):
+        processor = self._processor("online_raw")
+        position, heading, valid = self._inputs()
+
+        values, feature_valid = processor._prepare_history_dynamics(
+            {}, position=position, heading=heading, valid=valid
+        )
+
+        torch.testing.assert_close(
+            values[0, :, 0],
+            torch.full((2,), 2.0),
+            atol=2e-4,
+            rtol=0,
+        )
+        self.assertTrue(feature_valid.all())
+
+    def test_online_mode_ignores_conflicting_cached_fields(self):
+        processor = self._processor("online_raw")
+        position, heading, valid = self._inputs()
+        cached = {
+            "history_dynamics": torch.full((1, 2, 3), 999.0),
+            "history_dynamics_valid": torch.zeros(1, 2, dtype=torch.bool),
+        }
+
+        values, feature_valid = processor._prepare_history_dynamics(
+            cached, position=position, heading=heading, valid=valid
+        )
+
+        self.assertFalse(torch.eq(values, 999.0).any())
+        self.assertTrue(feature_valid.all())
+
+    def test_cached_mode_keeps_strict_missing_field_error(self):
+        processor = self._processor("cached_reconstructed")
+        position, heading, valid = self._inputs()
+
+        with self.assertRaisesRegex(KeyError, "history_dynamics.*missing"):
+            processor._prepare_history_dynamics(
+                {}, position=position, heading=heading, valid=valid
+            )
+
+    def test_cached_mode_returns_existing_fields(self):
+        processor = self._processor("cached_reconstructed")
+        position, heading, valid = self._inputs()
+        expected_values = torch.ones(1, 2, 3)
+        expected_valid = torch.tensor([[True, False]])
+
+        values, feature_valid = processor._prepare_history_dynamics(
+            {
+                "history_dynamics": expected_values,
+                "history_dynamics_valid": expected_valid,
+            },
+            position=position,
+            heading=heading,
+            valid=valid,
+        )
+
+        torch.testing.assert_close(values, expected_values)
+        torch.testing.assert_close(feature_valid, expected_valid)
+
+    def test_unknown_mode_fails_before_vocabulary_loading(self):
+        sampling = SimpleNamespace(num_k=1, temp=1.0)
+        with self.assertRaisesRegex(
+            ValueError, "cached_reconstructed.*online_raw"
+        ):
+            TokenProcessor(
+                map_token_file="does-not-exist.pkl",
+                agent_token_file="does-not-exist.pkl",
+                map_token_sampling=sampling,
+                agent_token_sampling=sampling,
+                history_dynamics={"is_active": True, "mode": "unknown"},
+                future_token_dynamics={"is_active": False},
+            )
+
+
 class FutureTokenDynamicsConditionerTest(unittest.TestCase):
     @staticmethod
     def _lookups():

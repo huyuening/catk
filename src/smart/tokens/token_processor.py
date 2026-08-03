@@ -21,6 +21,7 @@ from torch import Tensor
 from torch.distributions import Categorical
 from torch_geometric.data import HeteroData
 
+from src.smart.tokens.history_dynamics import estimate_raw_history_dynamics
 from src.smart.tokens.transition_dynamics_artifact import (
     VALID_SOURCES as TRANSITION_DYNAMICS_SOURCES,
     load_transition_dynamics_artifact,
@@ -31,6 +32,9 @@ from src.smart.utils import (
     transform_to_local,
     wrap_angle,
 )
+
+
+HISTORY_DYNAMICS_MODES = ("cached_reconstructed", "online_raw")
 
 
 class TokenProcessor(torch.nn.Module):
@@ -52,6 +56,17 @@ class TokenProcessor(torch.nn.Module):
             history_dynamics is not None
             and history_dynamics.get("is_active", False)
         )
+        self.history_dynamics_mode = (
+            history_dynamics.get("mode", "cached_reconstructed")
+            if history_dynamics is not None
+            else "cached_reconstructed"
+        )
+        if self.history_dynamics_mode not in HISTORY_DYNAMICS_MODES:
+            valid_modes = ", ".join(HISTORY_DYNAMICS_MODES)
+            raise ValueError(
+                "history_dynamics.mode must be one of "
+                f"{valid_modes}; got {self.history_dynamics_mode!r}"
+            )
         self.future_token_dynamics_active = bool(
             future_token_dynamics is not None
             and future_token_dynamics.get("is_active", False)
@@ -69,6 +84,38 @@ class TokenProcessor(torch.nn.Module):
         tokenized_map = self.tokenize_map(data)
         tokenized_agent = self.tokenize_agent(data)
         return tokenized_map, tokenized_agent
+
+    def _prepare_history_dynamics(
+        self,
+        agent_data,
+        *,
+        position: Tensor,
+        heading: Tensor,
+        valid: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        if self.history_dynamics_mode == "online_raw":
+            return estimate_raw_history_dynamics(
+                position=position,
+                heading=heading,
+                valid_mask=valid,
+                num_historical_steps=11,
+                token_shift_steps=self.shift,
+                dt=0.1,
+            )
+
+        required = ("history_dynamics", "history_dynamics_valid")
+        missing = [key for key in required if key not in agent_data]
+        if missing:
+            raise KeyError(
+                "history_dynamics mode 'cached_reconstructed' is active but "
+                f"the CatK cache is missing {missing}. Regenerate every "
+                "split with src.data_preprocess "
+                "--history_dynamics_filter_strength strong."
+            )
+        return (
+            agent_data["history_dynamics"].to(dtype=position.dtype),
+            agent_data["history_dynamics_valid"].bool(),
+        )
 
     def init_map_token(self, map_token_traj_path, argmin_sample_len=3) -> None:
         map_token_traj = pickle.load(open(map_token_traj_path, "rb"))["traj_src"]
@@ -230,6 +277,18 @@ class TokenProcessor(torch.nn.Module):
         pos = data["agent"]["position"][..., :2].contiguous()  # [n_agent, n_step, 2]
         vel = data["agent"]["velocity"]  # [n_agent, n_step, 2]
 
+        history_dynamics = None
+        history_dynamics_valid = None
+        if self.history_dynamics_active:
+            history_dynamics, history_dynamics_valid = (
+                self._prepare_history_dynamics(
+                    data["agent"],
+                    position=pos,
+                    heading=heading,
+                    valid=valid,
+                )
+            )
+
         # ! agent, specifically vehicle's heading can be 180 degree off. We fix it here.
         heading = self._clean_heading(valid, heading)
         # ! extrapolate to previous 5th step.
@@ -253,21 +312,8 @@ class TokenProcessor(torch.nn.Module):
             "gt_valid_raw": valid[:, self.shift :: self.shift],  # [n_agent, n_step=18]
         }
         if self.history_dynamics_active:
-            required = ("history_dynamics", "history_dynamics_valid")
-            missing = [key for key in required if key not in data["agent"]]
-            if missing:
-                raise KeyError(
-                    "history_dynamics is active but the CatK cache is missing "
-                    f"{missing}. Regenerate every split with "
-                    "src.data_preprocess "
-                    "--history_dynamics_filter_strength strong."
-                )
-            tokenized_agent["history_dynamics"] = data["agent"][
-                "history_dynamics"
-            ].to(dtype=pos.dtype)
-            tokenized_agent["history_dynamics_valid"] = data["agent"][
-                "history_dynamics_valid"
-            ].bool()
+            tokenized_agent["history_dynamics"] = history_dynamics
+            tokenized_agent["history_dynamics_valid"] = history_dynamics_valid
         # [n_token, 8]
         for k in ["veh", "ped", "cyc"]:
             tokenized_agent[f"trajectory_token_{k}"] = getattr(
