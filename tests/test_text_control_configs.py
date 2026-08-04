@@ -67,11 +67,8 @@ class TextControlConfigTest(unittest.TestCase):
         self.assertEqual(model["lr"], 5e-5)
         self.assertFalse(model["finetune"])
         self.assertTrue(model["history_dynamics"]["is_active"])
-        self.assertTrue(model["training_loss"]["spatial_aware_smoothing"])
-        self.assertEqual(
-            model["training_loss"]["spatial_aware_smoothing_mode"],
-            "trajtok_original",
-        )
+        self.assertFalse(model["training_loss"]["spatial_aware_smoothing"])
+        self.assertEqual(model["training_loss"]["label_smoothing"], 0.0)
         self.assertTrue(model["text_control"]["is_active"])
         self.assertTrue(model["text_control"]["freeze_base"])
         self.assertEqual(
@@ -133,11 +130,8 @@ class TextControlConfigTest(unittest.TestCase):
 
         model = config.model.model_config
         self.assertTrue(model.history_dynamics.is_active)
-        self.assertTrue(model.training_loss.spatial_aware_smoothing)
-        self.assertEqual(
-            model.training_loss.spatial_aware_smoothing_mode,
-            "trajtok_original",
-        )
+        self.assertFalse(model.training_loss.spatial_aware_smoothing)
+        self.assertEqual(model.training_loss.label_smoothing, 0.0)
         self.assertTrue(model.text_control.is_active)
         self.assertTrue(model.text_control.freeze_base)
         self.assertFalse(model.finetune)
@@ -172,6 +166,13 @@ class TextControlConfigTest(unittest.TestCase):
         self.assertIn("logger.wandb.id=null", text)
         self.assertIn("PRE_BC_CKPT", text)
         self.assertIn("TEXT_PROMPT_ROOT", text)
+        self.assertIn(
+            "/root/workspace/catk/logs/pre_bc_history_dynamics_hard_ce_b200/"
+            "runs/2026-07-30_21-15-08/checkpoints/last.ckpt",
+            text,
+        )
+        self.assertIn("text_control_pre_bc_history_dynamics_hard_ce", text)
+        self.assertNotIn("trajtok_original", text)
 
 
 if __name__ == "__main__":

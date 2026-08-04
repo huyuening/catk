@@ -54,11 +54,8 @@ class TextControlIntegrationTest(unittest.TestCase):
         )
         model = experiment["model"]["model_config"]
         self.assertTrue(model["history_dynamics"]["is_active"])
-        self.assertTrue(model["training_loss"]["spatial_aware_smoothing"])
-        self.assertEqual(
-            model["training_loss"]["spatial_aware_smoothing_mode"],
-            "trajtok_original",
-        )
+        self.assertFalse(model["training_loss"]["spatial_aware_smoothing"])
+        self.assertEqual(model["training_loss"]["label_smoothing"], 0.0)
         self.assertTrue(model["text_control"]["is_active"])
         self.assertFalse(model["finetune"])
         self.assertFalse(

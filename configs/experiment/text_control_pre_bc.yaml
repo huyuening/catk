@@ -1,8 +1,8 @@
 # @package _global_
 
-# ECoSim tag-only conditioning on the strongest frozen CatK PRE-BC base:
-# history dynamics + original TrajTok code loss. This is a weights-only warm
-# start, not ordinary CatK CLSFT and not a Lightning checkpoint resume.
+# ECoSim tag-only conditioning on the selected frozen CatK PRE-BC base:
+# cached reconstructed history dynamics + hard-label cross entropy. This is a
+# weights-only warm start, not ordinary CatK CLSFT or checkpoint resume.
 defaults:
   - pre_bc_history_dynamics
   - _self_
@@ -16,8 +16,8 @@ model:
     history_dynamics:
       is_active: true
     training_loss:
-      spatial_aware_smoothing: true
-      spatial_aware_smoothing_mode: trajtok_original
+      spatial_aware_smoothing: false
+      label_smoothing: 0.0
     text_control:
       is_active: true
       freeze_base: true

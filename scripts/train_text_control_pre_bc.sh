@@ -6,7 +6,7 @@ cd /root/workspace/catk
 source /root/anaconda3/etc/profile.d/conda.sh
 conda activate trajtok
 
-export PRE_BC_CKPT="${PRE_BC_CKPT:-/root/workspace/catk/logs/pre_bc_history_dynamics_trajtok_original_b200/runs/2026-07-27_19-49-13/checkpoints/last.ckpt}"
+export PRE_BC_CKPT="${PRE_BC_CKPT:-/root/workspace/catk/logs/pre_bc_history_dynamics_hard_ce_b200/runs/2026-07-30_21-15-08/checkpoints/last.ckpt}"
 export CACHE_ROOT="${CACHE_ROOT:-/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario_history_dynamics_exact}"
 export TEXT_PROMPT_ROOT="${TEXT_PROMPT_ROOT:-/mnt/pfs/waymo_motion_1_3_0/text_control_tags}"
 export TEXT_MODEL_PATH="${TEXT_MODEL_PATH:-distilbert-base-uncased}"
@@ -15,7 +15,7 @@ export FAST_WOSAC_GT_DIR="${FAST_WOSAC_GT_DIR:-/mnt/pfs/waymo_motion_1_3_0/prepr
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export NUM_GPUS="${NUM_GPUS:-8}"
 export MY_EXPERIMENT=text_control_pre_bc
-export MY_TASK_NAME="${MY_TASK_NAME:-text_control_pre_bc_history_dynamics_trajtok_original}"
+export MY_TASK_NAME="${MY_TASK_NAME:-text_control_pre_bc_history_dynamics_hard_ce}"
 export WANDB_OFFLINE="${WANDB_OFFLINE:-false}"
 export WANDB_ENTITY="${WANDB_ENTITY:-huyuening911-beijing-jiaotong-university}"
 
