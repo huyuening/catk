@@ -41,6 +41,49 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_hard_ce_contract(model_config: Any) -> tuple[Any, Any]:
+    history = _get(model_config, "history_dynamics", {})
+    loss = _get(model_config, "training_loss", {})
+    if not bool(_get(history, "is_active", False)):
+        raise RuntimeError("selected PRE_BC checkpoint has history dynamics disabled")
+
+    missing = object()
+    history_mode = _get(history, "mode", missing)
+    if history_mode != "cached_reconstructed":
+        raise RuntimeError(
+            "selected PRE_BC checkpoint must use history mode "
+            f"cached_reconstructed, got {history_mode!r}"
+        )
+
+    spatial_smoothing = _get(loss, "spatial_aware_smoothing", missing)
+    if spatial_smoothing is missing:
+        raise RuntimeError(
+            "selected PRE_BC checkpoint lacks spatial_aware_smoothing metadata"
+        )
+    if bool(spatial_smoothing):
+        raise RuntimeError(
+            "selected PRE_BC checkpoint must disable spatial smoothing"
+        )
+
+    label_smoothing = _get(loss, "label_smoothing", missing)
+    if label_smoothing is missing:
+        raise RuntimeError(
+            "selected PRE_BC checkpoint must use label_smoothing=0.0"
+        )
+    try:
+        label_smoothing = float(label_smoothing)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "selected PRE_BC checkpoint must use label_smoothing=0.0"
+        ) from exc
+    if label_smoothing != 0.0:
+        raise RuntimeError(
+            "selected PRE_BC checkpoint must use label_smoothing=0.0, "
+            f"got {label_smoothing}"
+        )
+    return history, loss
+
+
 def audit_pre_bc_for_text_control(
     checkpoint_path: Path,
     *,
@@ -73,16 +116,7 @@ def audit_pre_bc_for_text_control(
     _set(model_config, "text_control", text_config)
     _set(model_config, "finetune", False)
 
-    history = _get(model_config, "history_dynamics", {})
-    loss = _get(model_config, "training_loss", {})
-    if not bool(_get(history, "is_active", False)):
-        raise RuntimeError("selected PRE_BC checkpoint has history dynamics disabled")
-    if not bool(_get(loss, "spatial_aware_smoothing", False)):
-        raise RuntimeError("selected PRE_BC checkpoint has TrajTok smoothing disabled")
-    if _get(loss, "spatial_aware_smoothing_mode") != "trajtok_original":
-        raise RuntimeError(
-            "selected PRE_BC checkpoint is not trajtok_original loss mode"
-        )
+    history, loss = validate_hard_ce_contract(model_config)
 
     runtime = _TextControlRuntime(model_config)
     report = load_warm_start_state_dict(
@@ -125,11 +159,11 @@ def audit_pre_bc_for_text_control(
         print(f"  {name}")
     print(f"agent_vocabulary: {vocabulary_path}")
     print(f"agent_vocabulary_sha256: {_sha256(vocabulary_path)}")
-    print(f"history_dynamics_mode: {_get(history, 'mode', 'cached_reconstructed')}")
+    print(f"history_dynamics_mode: {_get(history, 'mode')}")
     print(
         "loss_mode: "
         f"spatial={_get(loss, 'spatial_aware_smoothing')}, "
-        f"mode={_get(loss, 'spatial_aware_smoothing_mode')}"
+        f"label_smoothing={float(_get(loss, 'label_smoothing'))}"
     )
     print("CFG disabled")
     return 0
