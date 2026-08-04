@@ -29,6 +29,15 @@ class HardCECheckpointContractTest(unittest.TestCase):
         self.assertEqual(history["mode"], "cached_reconstructed")
         self.assertEqual(loss["label_smoothing"], 0.0)
 
+    def test_accepts_legacy_history_checkpoint_without_mode_as_cached(self):
+        legacy = config()
+        del legacy["history_dynamics"]["mode"]
+
+        history, loss = validate_hard_ce_contract(legacy)
+
+        self.assertEqual(history["mode"], "cached_reconstructed")
+        self.assertEqual(loss["label_smoothing"], 0.0)
+
     def test_rejects_disabled_or_online_history(self):
         with self.assertRaisesRegex(RuntimeError, "history dynamics disabled"):
             validate_hard_ce_contract(config(active=False))

@@ -49,6 +49,11 @@ def validate_hard_ce_contract(model_config: Any) -> tuple[Any, Any]:
 
     missing = object()
     history_mode = _get(history, "mode", missing)
+    if history_mode is missing:
+        # Checkpoints created before history modes were introduced only had
+        # the cached reconstructed path, so preserve that legacy default.
+        history_mode = "cached_reconstructed"
+        _set(history, "mode", history_mode)
     if history_mode != "cached_reconstructed":
         raise RuntimeError(
             "selected PRE_BC checkpoint must use history mode "

@@ -63,7 +63,7 @@ export PRE_BC_CKPT=/root/workspace/catk/logs/pre_bc_history_dynamics_hard_ce_b20
 export CACHE_ROOT=/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario_history_dynamics_exact
 export TEXT_PROMPT_ROOT=/mnt/pfs/waymo_motion_1_3_0/text_control_tags
 
-python src/run.py experiment=text_control_pre_bc --cfg job --resolve
+python -m src.run experiment=text_control_pre_bc --cfg job --resolve
 ```
 
 再对真实 checkpoint 做 fail-closed 审计：
@@ -115,7 +115,7 @@ export PRE_BC_CKPT=/root/workspace/catk/logs/pre_bc_history_dynamics_hard_ce_b20
 export CACHE_ROOT=/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario_history_dynamics_exact
 export TEXT_PROMPT_ROOT=/mnt/pfs/waymo_motion_1_3_0/text_control_tags
 
-python src/run.py experiment=text_control_pre_bc --cfg job --resolve
+python -m src.run experiment=text_control_pre_bc --cfg job --resolve
 python -m src.smart.inference.audit_text_control "$PRE_BC_CKPT"
 bash scripts/train_text_control_pre_bc.sh
 ```
