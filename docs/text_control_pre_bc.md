@@ -4,11 +4,11 @@
 
 ```text
 /root/workspace/catk/logs/
-pre_bc_history_dynamics_trajtok_original_b200/
-runs/2026-07-27_19-49-13/checkpoints/last.ckpt
+pre_bc_history_dynamics_hard_ce_b200/
+runs/2026-07-30_21-15-08/checkpoints/last.ckpt
 ```
 
-该基础模型保留两项已经验证有效的改进：由历史 11 帧重构的纵向加速度、角速度、横向加速度，以及 TrajTok 原代码中的空间软标签损失。这里不再执行普通 CAT-K CLSFT；地图、智能体 token、历史动力学、六个时空交互块、token head 和未来动力学分支全部冻结。仅训练：
+该基础模型使用历史 11 帧重构的纵向加速度、角速度、横向加速度，并使用 hard-label cross entropy：`spatial_aware_smoothing=false`、`label_smoothing=0.0`。文本微调阶段继续使用相同的 hard CE，不执行普通 CAT-K CLSFT；地图、智能体 token、历史动力学、六个时空交互块、token head 和未来动力学分支全部冻结。仅训练：
 
 - DistilBERT 最后六层注意力中 `q/k/v/out` 的 rank-16 LoRA；
 - DistilBERT 到 256 维的文本投影；
@@ -47,12 +47,14 @@ bash scripts/build_text_control_tags.sh
 
 训练标签只能来自训练集未来。验证集未来标签只用于 oracle validation，不能进入自定义推理。
 
+如果已经生成过标签，只有在 `train_scenario_mapping.json`、`val_scenario_mapping.json` 以及它们引用的训练/验证 tag JSON 均存在时，才可以跳过本节。仅存在两个 mapping 文件但 tag 目录不完整时必须重新生成。
+
 ## 2. 训练前只读审计
 
 先解析 Hydra 配置，不启动训练：
 
 ```bash
-export PRE_BC_CKPT=/root/workspace/catk/logs/pre_bc_history_dynamics_trajtok_original_b200/runs/2026-07-27_19-49-13/checkpoints/last.ckpt
+export PRE_BC_CKPT=/root/workspace/catk/logs/pre_bc_history_dynamics_hard_ce_b200/runs/2026-07-30_21-15-08/checkpoints/last.ckpt
 export CACHE_ROOT=/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario_history_dynamics_exact
 export TEXT_PROMPT_ROOT=/mnt/pfs/waymo_motion_1_3_0/text_control_tags
 
@@ -74,7 +76,15 @@ python -m src.smart.inference.audit_text_control \
   --local-files-only
 ```
 
-审计必须满足：所有 missing key 都位于 `encoder.agent_encoder.text_control_adapter.`，unexpected key 为 0；打印的历史动力学模式为 `cached_reconstructed`，损失模式为 `trajtok_original`，并明确显示 `CFG disabled`。输出还包含词表路径、SHA-256、冻结/可训练参数数量和全部可训练张量名称。
+审计必须满足：所有 missing key 都位于 `encoder.agent_encoder.text_control_adapter.`，unexpected key 为 0，并打印：
+
+```text
+history_dynamics_mode: cached_reconstructed
+loss_mode: spatial=False, label_smoothing=0.0
+CFG disabled
+```
+
+输出还包含词表路径、SHA-256、冻结/可训练参数数量和全部可训练张量名称。任何一项不符都不要启动分布式训练。
 
 也可以在模型构建后检查边界：
 
@@ -86,6 +96,26 @@ print("\n".join(trainable))
 ```
 
 ## 3. 启动训练
+
+从服务器当前代码开始，完整执行顺序为：
+
+```bash
+cd /root/workspace/catk
+source /root/anaconda3/etc/profile.d/conda.sh
+conda activate trajtok
+
+git pull --ff-only origin main
+
+export PRE_BC_CKPT=/root/workspace/catk/logs/pre_bc_history_dynamics_hard_ce_b200/runs/2026-07-30_21-15-08/checkpoints/last.ckpt
+export CACHE_ROOT=/mnt/pfs/waymo_motion_1_3_0/preprocessed_scenario_history_dynamics_exact
+export TEXT_PROMPT_ROOT=/mnt/pfs/waymo_motion_1_3_0/text_control_tags
+
+python src/run.py experiment=text_control_pre_bc --cfg job --resolve
+python -m src.smart.inference.audit_text_control "$PRE_BC_CKPT"
+bash scripts/train_text_control_pre_bc.sh
+```
+
+前两条 Python 命令只解析配置和审计权重，不会开始训练。只有审计满足上一节列出的 hard-CE 契约，才执行最后一条训练命令。
 
 ```bash
 bash scripts/train_text_control_pre_bc.sh
