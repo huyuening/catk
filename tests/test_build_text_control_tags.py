@@ -1,8 +1,10 @@
 import csv
 import gzip
 import importlib.util
+import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -178,6 +180,8 @@ class BuildTextControlTagsCliTest(unittest.TestCase):
                 "train",
                 "--mapping-output",
                 str(self.mapping_path),
+                "--workers",
+                "1",
             ]
         )
 
@@ -201,6 +205,122 @@ class BuildTextControlTagsCliTest(unittest.TestCase):
             first_tags,
             ["LeftTurn(111 at 11-31)", "KeepSpeed(111 at 11-31)"],
         )
+
+    def test_parser_defaults_to_eighty_workers_and_one_thousand_scenarios(self):
+        args = BUILD_TAGS.build_parser().parse_args(
+            [
+                "--input", str(self.input_path),
+                "--output-root", str(self.output_root),
+                "--split", "train",
+                "--mapping-output", str(self.mapping_path),
+            ]
+        )
+        self.assertEqual(args.workers, 80)
+        self.assertEqual(args.progress_every, 1000)
+
+    def test_invalid_parallel_settings_fail_before_reading_input(self):
+        common = {
+            "input_paths": [self.root / "missing.csv.gz"],
+            "output_root": self.output_root,
+            "split": "train",
+            "mapping_output": self.mapping_path,
+        }
+        with self.assertRaisesRegex(ValueError, "workers"):
+            BUILD_TAGS.convert_action_rows(**common, workers=0)
+        with self.assertRaisesRegex(ValueError, "progress_every"):
+            BUILD_TAGS.convert_action_rows(**common, progress_every=0)
+
+    def test_serial_conversion_reports_exact_progress(self):
+        rows = []
+        for scenario_index in range(2):
+            rows.extend(
+                BuildTextControlTagsTest.row(
+                    frame,
+                    "LEFT_TURN",
+                    scenario_id=f"waymo-{scenario_index}",
+                    global_index=17 + scenario_index,
+                    track_id=100 + scenario_index,
+                )
+                for frame in range(11, 31)
+            )
+        self.write_rows(rows)
+        progress = io.StringIO()
+        BUILD_TAGS.convert_action_rows(
+            input_paths=[self.input_path],
+            output_root=self.output_root,
+            split="train",
+            mapping_output=self.mapping_path,
+            workers=1,
+            progress_every=1,
+            progress_stream=progress,
+        )
+        output = progress.getvalue()
+        self.assertIn("status=start", output)
+        self.assertIn("workers=1", output)
+        self.assertIn("completed=1", output)
+        self.assertIn("status=complete", output)
+        self.assertIn("completed=2", output)
+        self.assertIn("rows=40", output)
+        self.assertIn("pending=0", output)
+
+    def cli_args(self, output_root, mapping_path, *, workers):
+        return [
+            sys.executable,
+            str(MODULE_PATH),
+            "--input", str(self.input_path),
+            "--output-root", str(output_root),
+            "--split", "train",
+            "--mapping-output", str(mapping_path),
+            "--workers", str(workers),
+            "--progress-every", "1",
+        ]
+
+    @staticmethod
+    def artifact_bytes(root):
+        return {
+            path.relative_to(root): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    def test_parallel_and_serial_cli_outputs_are_identical(self):
+        rows = []
+        for scenario_index in range(6):
+            rows.extend(
+                BuildTextControlTagsTest.row(
+                    frame,
+                    "RIGHT_LANE_CHANGE" if scenario_index % 2 else "LEFT_TURN",
+                    scenario_id=f"waymo-{scenario_index}",
+                    global_index=100 + scenario_index,
+                    track_id=1000 + scenario_index,
+                )
+                for frame in range(11, 31)
+            )
+        self.write_rows(rows)
+        serial_root = self.root / "serial"
+        parallel_root = self.root / "parallel"
+        serial = subprocess.run(
+            self.cli_args(serial_root, serial_root / "mapping.json", workers=1),
+            cwd=MODULE_PATH.parents[3],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        parallel = subprocess.run(
+            self.cli_args(parallel_root, parallel_root / "mapping.json", workers=2),
+            cwd=MODULE_PATH.parents[3],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(serial.returncode, 0, serial.stderr)
+        self.assertEqual(parallel.returncode, 0, parallel.stderr)
+        self.assertEqual(
+            self.artifact_bytes(serial_root),
+            self.artifact_bytes(parallel_root),
+        )
+        self.assertIn("status=complete", parallel.stderr)
+        self.assertIn("completed=6", parallel.stderr)
 
     def test_cli_rejects_test_split(self):
         self.write_rows([])

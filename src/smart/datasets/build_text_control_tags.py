@@ -5,6 +5,9 @@ import csv
 import gzip
 import json
 from pathlib import Path
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+import sys
+import time
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, TextIO, Tuple
 
 
@@ -233,6 +236,72 @@ def _write_json(path: Path, value: object) -> None:
     temporary.replace(path)
 
 
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+class _ProgressReporter:
+    def __init__(self, *, split, workers, every, input_count, stream):
+        self.split = split
+        self.workers = workers
+        self.every = every
+        self.input_count = input_count
+        self.stream = stream
+        self.started_at = time.monotonic()
+        self.submitted_count = 0
+        self.completed_count = 0
+        self.row_count = 0
+        self.tag_count = 0
+
+    def start(self):
+        self._emit("start")
+
+    def submitted(self):
+        self.submitted_count += 1
+
+    def completed(self, row_count, tag_count):
+        self.completed_count += 1
+        self.row_count += row_count
+        self.tag_count += tag_count
+        if self.completed_count % self.every == 0:
+            self._emit("running")
+
+    def finish(self):
+        self._emit("complete")
+
+    def _emit(self, status):
+        elapsed = max(time.monotonic() - self.started_at, 0.0)
+        rate = self.completed_count / elapsed if elapsed else 0.0
+        pending = self.submitted_count - self.completed_count
+        print(
+            f"[text-tags {self.split}] status={status} workers={self.workers} "
+            f"inputs={self.input_count} completed={self.completed_count} "
+            f"submitted={self.submitted_count} rows={self.row_count} "
+            f"tags={self.tag_count} pending={pending} "
+            f"rate={rate:.1f} scenes/s elapsed={_format_elapsed(elapsed)}",
+            file=self.stream,
+            flush=True,
+        )
+
+
+def _write_scene_tags(
+    rows: Sequence[Mapping[str, str]],
+    tag_path: str | Path,
+    stop_speed_mps: float,
+    acceleration_threshold: float,
+) -> Tuple[int, int]:
+    tags = build_intervals(
+        rows,
+        stop_speed_mps=stop_speed_mps,
+        accel_mps2=acceleration_threshold,
+    )
+    _write_json(Path(tag_path), tags)
+    return len(rows), len(tags)
+
+
 def convert_action_rows(
     *,
     input_paths: Sequence[str | Path],
@@ -241,7 +310,14 @@ def convert_action_rows(
     mapping_output: str | Path,
     stop_speed_mps: float = 0.2,
     acceleration_threshold: float = 0.5,
+    workers: int = 80,
+    progress_every: int = 1000,
+    progress_stream: TextIO | None = None,
 ) -> Dict[str, str]:
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    if progress_every < 1:
+        raise ValueError("progress_every must be at least 1")
     split = str(split).lower()
     if split not in {"train", "val"}:
         raise ValueError("split must be 'train' or 'val'")
@@ -253,34 +329,98 @@ def convert_action_rows(
     tag_subdir = "waymo_train_v_action" if split == "train" else "waymo_val_v_action"
     mapping: Dict[str, str] = {}
     scene_owners: Dict[str, str] = {}
-    for scenario_id, rows in _iter_scenarios(_iter_rows(paths)):
-        global_index = _single_int(rows, "global_index")
-        _single_int(rows, "dataset_current_time_index")
-        scene_id = f"scene_{global_index}"
-        previous_owner = scene_owners.get(scene_id)
-        if previous_owner is not None and previous_owner != scenario_id:
-            raise ValueError(
-                f"{scene_id} maps to both {previous_owner!r} and {scenario_id!r}"
+    reporter = _ProgressReporter(
+        split=split,
+        workers=workers,
+        every=progress_every,
+        input_count=len(paths),
+        stream=sys.stderr if progress_stream is None else progress_stream,
+    )
+    reporter.start()
+
+    if workers == 1:
+        for scenario_id, rows in _iter_scenarios(_iter_rows(paths)):
+            global_index = _single_int(rows, "global_index")
+            _single_int(rows, "dataset_current_time_index")
+            scene_id = f"scene_{global_index}"
+            previous_owner = scene_owners.get(scene_id)
+            if previous_owner is not None and previous_owner != scenario_id:
+                raise ValueError(
+                    f"{scene_id} maps to both {previous_owner!r} and {scenario_id!r}"
+                )
+            scene_owners[scene_id] = scenario_id
+            mapping[scenario_id] = scene_id
+            tag_path = (
+                output_root
+                / "tag_prompts"
+                / tag_subdir
+                / "tags"
+                / str(global_index % 100)
+                / f"{scene_id}.json"
             )
-        scene_owners[scene_id] = scenario_id
-        mapping[scenario_id] = scene_id
-        tags = build_intervals(
-            rows,
-            stop_speed_mps=stop_speed_mps,
-            accel_mps2=acceleration_threshold,
-        )
-        tag_path = (
-            output_root
-            / "tag_prompts"
-            / tag_subdir
-            / "tags"
-            / str(global_index % 100)
-            / f"{scene_id}.json"
-        )
-        _write_json(tag_path, tags)
+            reporter.submitted()
+            row_count, tag_count = _write_scene_tags(
+                rows,
+                tag_path,
+                stop_speed_mps,
+                acceleration_threshold,
+            )
+            reporter.completed(row_count, tag_count)
+    else:
+        executor = ProcessPoolExecutor(max_workers=workers)
+        pending = set()
+        max_pending = workers * 2
+        try:
+            for scenario_id, rows in _iter_scenarios(_iter_rows(paths)):
+                global_index = _single_int(rows, "global_index")
+                _single_int(rows, "dataset_current_time_index")
+                scene_id = f"scene_{global_index}"
+                previous_owner = scene_owners.get(scene_id)
+                if previous_owner is not None and previous_owner != scenario_id:
+                    raise ValueError(
+                        f"{scene_id} maps to both {previous_owner!r} and {scenario_id!r}"
+                    )
+                scene_owners[scene_id] = scenario_id
+                mapping[scenario_id] = scene_id
+                tag_path = (
+                    output_root
+                    / "tag_prompts"
+                    / tag_subdir
+                    / "tags"
+                    / str(global_index % 100)
+                    / f"{scene_id}.json"
+                )
+                future = executor.submit(
+                    _write_scene_tags,
+                    rows,
+                    tag_path,
+                    stop_speed_mps,
+                    acceleration_threshold,
+                )
+                pending.add(future)
+                reporter.submitted()
+                if len(pending) >= max_pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for completed_future in done:
+                        row_count, tag_count = completed_future.result()
+                        reporter.completed(row_count, tag_count)
+
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for completed_future in done:
+                    row_count, tag_count = completed_future.result()
+                    reporter.completed(row_count, tag_count)
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
     sorted_mapping = {key: mapping[key] for key in sorted(mapping)}
     _write_json(Path(mapping_output), sorted_mapping)
+    reporter.finish()
     return sorted_mapping
 
 
@@ -294,6 +434,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mapping-output", required=True, type=Path)
     parser.add_argument("--stop-speed-mps", type=float, default=0.2)
     parser.add_argument("--acceleration-threshold", type=float, default=0.5)
+    parser.add_argument("--workers", type=int, default=80)
+    parser.add_argument("--progress-every", type=int, default=1000)
     return parser
 
 
@@ -306,6 +448,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         mapping_output=args.mapping_output,
         stop_speed_mps=args.stop_speed_mps,
         acceleration_threshold=args.acceleration_threshold,
+        workers=args.workers,
+        progress_every=args.progress_every,
     )
     return 0
 
