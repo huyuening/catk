@@ -322,6 +322,17 @@ class BuildTextControlTagsCliTest(unittest.TestCase):
         self.assertIn("status=complete", parallel.stderr)
         self.assertIn("completed=6", parallel.stderr)
 
+    def test_shell_wrapper_forwards_parallel_defaults(self):
+        script_path = MODULE_PATH.parents[3] / "scripts" / "build_text_control_tags.sh"
+        script = script_path.read_text(encoding="utf-8")
+        self.assertIn('TAG_WORKERS="${TAG_WORKERS:-80}"', script)
+        self.assertIn(
+            'TAG_PROGRESS_EVERY="${TAG_PROGRESS_EVERY:-1000}"',
+            script,
+        )
+        self.assertIn('--workers "${TAG_WORKERS}"', script)
+        self.assertIn('--progress-every "${TAG_PROGRESS_EVERY}"', script)
+
     def test_cli_rejects_test_split(self):
         self.write_rows([])
         with self.assertRaises(SystemExit):

@@ -33,6 +33,9 @@ source /root/anaconda3/etc/profile.d/conda.sh
 conda activate trajtok
 
 export TEXT_PROMPT_ROOT=/mnt/pfs/waymo_motion_1_3_0/text_control_tags
+# 默认 80 个进程；若 PFS 小文件写入拥塞，可降低到 16 或 32
+export TAG_WORKERS=80
+export TAG_PROGRESS_EVERY=1000
 
 ACTION_ROWS=/path/train-actions-000.csv.gz,/path/train-actions-001.csv.gz \
 TEXT_SPLIT=train \
@@ -44,6 +47,8 @@ TEXT_SPLIT=val \
 TEXT_MAPPING_PATH="$TEXT_PROMPT_ROOT/val_scenario_mapping.json" \
 bash scripts/build_text_control_tags.sh
 ```
+
+gzip 输入仍按顺序读取；`TAG_WORKERS` 进程并行计算各场景标签并原子写入 JSON。进度输出到 stderr；将 `TAG_WORKERS=1` 可切换为用于诊断的串行模式。
 
 训练标签只能来自训练集未来。验证集未来标签只用于 oracle validation，不能进入自定义推理。
 
