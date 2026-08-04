@@ -8,6 +8,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 
 MODULE_PATH = (
@@ -23,6 +24,38 @@ if SPEC is None or SPEC.loader is None:
 BUILD_TAGS = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = BUILD_TAGS
 SPEC.loader.exec_module(BUILD_TAGS)
+
+
+class _FakeFuture:
+    def __init__(self, *, value=(20, 2), error=None, cancellable=True):
+        self.value = value
+        self.error = error
+        self.cancellable = cancellable
+        self.cancel_calls = 0
+
+    def result(self):
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+    def cancel(self):
+        self.cancel_calls += 1
+        return self.cancellable
+
+
+class _FakeExecutor:
+    def __init__(self, futures):
+        self.futures = iter(futures)
+        self.submissions = []
+        self.shutdown_calls = []
+
+    def submit(self, *args):
+        future = next(self.futures)
+        self.submissions.append((args, future))
+        return future
+
+    def shutdown(self, **kwargs):
+        self.shutdown_calls.append(kwargs)
 
 
 class BuildTextControlTagsTest(unittest.TestCase):
@@ -321,6 +354,89 @@ class BuildTextControlTagsCliTest(unittest.TestCase):
         )
         self.assertIn("status=complete", parallel.stderr)
         self.assertIn("completed=6", parallel.stderr)
+
+    def test_parallel_scheduler_waits_at_exactly_twice_the_worker_count(self):
+        self.write_rows(
+            [
+                BuildTextControlTagsTest.row(
+                    frame,
+                    "LEFT_TURN",
+                    scenario_id=f"waymo-{scenario_index}",
+                    global_index=17 + scenario_index,
+                    track_id=100 + scenario_index,
+                )
+                for scenario_index in range(5)
+                for frame in range(11, 31)
+            ]
+        )
+        executor = _FakeExecutor([_FakeFuture() for _ in range(5)])
+        wait_calls = []
+
+        def complete_one(pending, *, return_when):
+            wait_calls.append((len(executor.submissions), len(pending), return_when))
+            completed = next(
+                future for _, future in executor.submissions if future in pending
+            )
+            return {completed}, set(pending) - {completed}
+
+        with patch.object(BUILD_TAGS, "ProcessPoolExecutor", return_value=executor), patch.object(
+            BUILD_TAGS, "wait", side_effect=complete_one
+        ):
+            BUILD_TAGS.convert_action_rows(
+                input_paths=[self.input_path],
+                output_root=self.output_root,
+                split="train",
+                mapping_output=self.mapping_path,
+                workers=2,
+                progress_stream=io.StringIO(),
+            )
+
+        self.assertEqual(wait_calls[0], (4, 4, BUILD_TAGS.FIRST_COMPLETED))
+        self.assertEqual(len(executor.submissions), 5)
+
+    def test_parallel_worker_failure_cancels_queued_work_and_skips_mapping(self):
+        self.write_rows(
+            [
+                BuildTextControlTagsTest.row(
+                    frame,
+                    "LEFT_TURN",
+                    scenario_id=f"waymo-{scenario_index}",
+                    global_index=17 + scenario_index,
+                    track_id=100 + scenario_index,
+                )
+                for scenario_index in range(4)
+                for frame in range(11, 31)
+            ]
+        )
+        failure = RuntimeError("worker failed")
+        failed_future = _FakeFuture(error=failure)
+        queued_futures = [_FakeFuture() for _ in range(3)]
+        executor = _FakeExecutor([failed_future, *queued_futures])
+
+        def fail_first(pending, *, return_when):
+            self.assertIs(return_when, BUILD_TAGS.FIRST_COMPLETED)
+            self.assertEqual(len(pending), 4)
+            return {failed_future}, set(pending) - {failed_future}
+
+        with patch.object(BUILD_TAGS, "ProcessPoolExecutor", return_value=executor), patch.object(
+            BUILD_TAGS, "wait", side_effect=fail_first
+        ):
+            with self.assertRaisesRegex(RuntimeError, "worker failed"):
+                BUILD_TAGS.convert_action_rows(
+                    input_paths=[self.input_path],
+                    output_root=self.output_root,
+                    split="train",
+                    mapping_output=self.mapping_path,
+                    workers=2,
+                    progress_stream=io.StringIO(),
+                )
+
+        self.assertTrue(all(future.cancel_calls == 1 for future in queued_futures))
+        self.assertEqual(
+            executor.shutdown_calls,
+            [{"wait": True, "cancel_futures": True}],
+        )
+        self.assertFalse(self.mapping_path.exists())
 
     def test_shell_wrapper_forwards_parallel_defaults(self):
         script_path = MODULE_PATH.parents[3] / "scripts" / "build_text_control_tags.sh"
